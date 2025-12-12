@@ -54,20 +54,6 @@ int main(void)
         printf("旋转成功，L2 范数保持。\n");
     }
 
-    // 展示旋转前后结合编码流程
-    float *rotated = (float *)malloc(sizeof(float) * dim);
-    if (rotated == NULL)
-    {
-        printf("分配旋转结果缓冲失败\n");
-        destroyRotatorMatrix(&P);
-        return 1;
-    }
-
-    rotateVector(P, vec, rotated, (int)dim);
-    printf("对旋转后向量做 CAQ 编码示例:\n");
-    encodeExample(rotated, dim, 9);
-
-    free(rotated);
     destroyRotatorMatrix(&P);
     return 0;
 }
