@@ -1,0 +1,88 @@
+# 
+
+此项目是 SAQ 量化算法中 CAQ 量化算法的 C 语言风格版本。算法原仓库为：https://github.com/howarlii/SAQ
+
+## 运行测试说明
+
+### 编译：
+
+```bash
+cc -std=c11 -O2 encoder_example.c -lm -o encoder_example
+cc -std=c11 -O2 rotator_example.c -lm -o rotator_example
+```
+
+### 运行
+
+```bash
+./encoder_example
+./rotator_example
+```
+
+# 移植差异说明
+
+## 1. 编码器差异
+
+注意：encoder 部分可能与 SAQ 量化结果存在微弱区别，原因主要是，浮点加法使用结合律可能会吞掉部分精度，而 CPP 版本 double vec_sum = o.sum() 使用了 Eigen 的 SIMD 加法，使用了浮点结合律，因此可能会有微小差异。具体代码：
+
+```C
+    originalVectorSum = static_cast<double>(sum);
+```
+
+区别如下示例：
+
+```bash
+原始：
+vec_sum: 0.102713
+ip_o_code: 858.692, code_l2sqr: 25802011, code_sum: 98193
+  v_mi: -0.307509, v_mx: 0.307509, delta: 0.00120121
+  ip_o_oa: 0.999945
+  oa_l2sqr: 0.999936
+新：
+originalVectorSum: 0.102712
+oriQuantCodeIp: 858.692, quantCodeL2Sqr: 25802011, quantCodeSum: 98193
+  Max: 0.307509, Min: -0.307509, Delta: 0.00120121
+  OriginalQuantizedIp: 0.999945
+  QuantizedL2Sqr: 0.999936
+  OrigL2Sqr: 1
+Mismatch at index 182: 177 != 176 Code mismatch for vector 653
+Value mismatch for vector 653
+Expected: Max=1, Min=-1, Delta=0.00390625, QuantizedL2Sqr=10.5744, OriginalQuantizedIp=3.25176, OrigL2Sqr=1, OrigL2Norm=1, RescaleFactor=0.307526
+Got: Max=1, Min=-1, Delta=0.00390625, QuantizedL2Sqr=10.572, OriginalQuantizedIp=3.25138, OrigL2Sqr=1, OrigL2Norm=1, RescaleFactor=0.307561
+Mismatch at index 335: 323 != 322 Mismatch at index 336: 209 != 210 Mismatch at index 365: 269 != 268 Code mismatch for vector 7226
+Value mismatch for vector 7226
+Expected: Max=1, Min=-1, Delta=0.00390625, QuantizedL2Sqr=8.55286, OriginalQuantizedIp=2.92443, OrigL2Sqr=1, OrigL2Norm=1, RescaleFactor=0.341947
+Got: Max=1, Min=-1, Delta=0.00390625, QuantizedL2Sqr=8.5567, OriginalQuantizedIp=2.92509, OrigL2Sqr=1, OrigL2Norm=1, RescaleFactor=0.34187
+Mismatch at index 107: 217 != 218 Code mismatch for vector 7994
+Value mismatch for vector 7994
+Expected: Max=1, Min=-1, Delta=0.00390625, QuantizedL2Sqr=13.7857, OriginalQuantizedIp=3.71285, OrigL2Sqr=1, OrigL2Norm=1, RescaleFactor=0.269335
+Got: Max=1, Min=-1, Delta=0.00390625, QuantizedL2Sqr=13.7869, OriginalQuantizedIp=3.713, OrigL2Sqr=1, OrigL2Norm=1, RescaleFactor=0.269324
+Total code mismatches: 3
+Total value mismatches: 3
+```
+
+## 2. 正交矩阵差异
+
+由于 SAQ 使用的 Eigen 难以直接嵌入 C 环境，我们重写了一版本正交矩阵生成算法，提供了两个版本用于测试。
+
+默认使用 Householder_Random_Orthogonal_Matrix 以贴近 Eigen 版本的生成算法。
+
+在 GIST 数据集上测试结果与 SAQ 的 Eigen::HouseholderQR 随机正交矩阵效果接近，下面是 GIST 数据集上的 IvfErrorTestL2Sqr.SAQ_GIST_AllBits 测试结果：
+
+```bash
+原始：
+SAQ 8-bit (gist)    | Error Acc: 4.00437e-05 (diff=0.03%)    Fast: 1.1454e-01 (diff=0.37%)      Vars: 8.3301e-01
+Householder_Random_Orthogonal_Matrix：
+SAQ 8-bit (gist)    | Error Acc: 4.00800e-05 (diff=0.12%)    Fast: 1.1457e-01 (diff=0.39%)      Vars: 8.3301e-01
+
+原始：
+SAQ 4-bit (gist)    | Error Acc: 5.77080e-04 (diff=-0.01%)   Fast: 1.4479e-01 (diff=0.19%)      Vars: 7.6837e-01
+Householder_Random_Orthogonal_Matrix：
+SAQ 4-bit (gist)    | Error Acc: 5.77456e-04 (diff=0.05%)    Fast: 1.4492e-01 (diff=0.27%)      Vars: 7.6837e-01
+
+原始：
+SAQ 1-bit (gist)    | Error Acc: 5.88650e-03 (diff=0.02%)    Fast: 1.5131e-01 (diff=0.12%)      Vars: 7.5919e-01
+Householder_Random_Orthogonal_Matrix：
+SAQ 1-bit (gist)    | Error Acc: 5.88780e-03 (diff=0.04%)    Fast: 1.5130e-01 (diff=0.12%)      Vars: 7.5919e-01
+```
+
+
