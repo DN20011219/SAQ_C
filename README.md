@@ -85,4 +85,6 @@ Householder_Random_Orthogonal_Matrix：
 SAQ 1-bit (gist)    | Error Acc: 5.88780e-03 (diff=0.04%)    Fast: 1.5130e-01 (diff=0.12%)      Vars: 7.5919e-01
 ```
 
+## 3. Query 编码器差异
 
+经过测试，本 query 量化器与原始 SAQ 仓库中量化结果完全一致。
