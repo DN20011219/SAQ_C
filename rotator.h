@@ -1,4 +1,5 @@
-#pragma once
+#ifndef ROTATOR_H
+#define ROTATOR_H
 
 #include <stddef.h>
 #include <stdint.h>
@@ -166,7 +167,7 @@ void randomOrthogonalMatrix(float* P, int D) {
 #endif
 
 // 生成一个正交矩阵
-void generateRotatorMatrix(float **P_out, int D)
+void createRotatorMatrix(float **P_out, size_t D)
 {
     float *P = (float *)malloc(sizeof(float) * D * D);
     randomOrthogonalMatrix(P, D);
@@ -183,12 +184,13 @@ void destroyRotatorMatrix(float **P)
 }
 
 // 使用矩阵 P 旋转向量 vec_in，结果存入 vec_out
-void rotateVector(const float* P, const float* vec_in, float* vec_out, int D) {
-    for (int i = 0; i < D; i++) {
+void rotateVector(const float* P, const float* vec_in, float* vec_out, size_t D) {
+    for (size_t i = 0; i < D; i++) {
         float s = 0.0f;
-        for (int j = 0; j < D; j++)
+        for (size_t j = 0; j < D; j++)
             s += P[i * D + j] * vec_in[j];
         vec_out[i] = s;
     }
 }
 
+#endif // ROTATOR_H

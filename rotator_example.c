@@ -42,7 +42,7 @@ int main(void)
     const float vec[4] = {0.1f, -0.3f, 0.5f, -0.2f};
 
     float *P = NULL;
-    generateRotatorMatrix(&P, (int)dim);
+    createRotatorMatrix(&P, (int)dim);
     if (P == NULL)
     {
         printf("生成旋转矩阵失败\n");

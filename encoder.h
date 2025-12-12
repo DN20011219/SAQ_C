@@ -1,10 +1,14 @@
-#pragma once
+#ifndef ENCODER_H
+#define ENCODER_H
 
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <math.h>
 #include <stdio.h>
+
+#define ADJUST_ROUND_LIMIT 6
+#define ADJUST_EPSILON 1e-8f
 
 typedef struct {
     float max;
@@ -70,24 +74,33 @@ typedef struct {
     float caqAdjustEpsilon;      // 调整阈值
     uint32_t codeMax;            // 量化编码的最大值
     uint32_t codeMin;            // 量化编码的最小值
-} CaqQuantConfig;
+} CaqEncodeConfig;
 
-// 为一批向量创建一个公共的量化配置对象，因为一次量化通常会处理多条向量，copy 一份配置开销较小，避免复杂的内存管理
-CaqQuantConfig createCaqQuantConfig(size_t dim, size_t numBits,
-                                    size_t adjustRound,
-                                    float adjustEpsilon) {
-    CaqQuantConfig cfg;
-    cfg.dimPadded = dim;
-    cfg.numBits = numBits;
-    cfg.caqAdjustRoundLimit = (int)adjustRound;
-    cfg.caqAdjustEpsilon = adjustEpsilon;
-    cfg.codeMax = (uint32_t)((1u << numBits) - 1u);
-    cfg.codeMin = 0u;
-    return cfg;
+// 为一批向量创建一个公共的量化配置对象
+void createCaqQuantConfig(
+    size_t dim, 
+    size_t numBits,
+    CaqEncodeConfig **cfg_out
+) {
+    *cfg_out = (CaqEncodeConfig *)malloc(sizeof(CaqEncodeConfig));
+    (*cfg_out)->dimPadded = dim;
+    (*cfg_out)->numBits = numBits;
+    (*cfg_out)->caqAdjustRoundLimit = (int)ADJUST_ROUND_LIMIT;
+    (*cfg_out)->caqAdjustEpsilon = ADJUST_EPSILON;
+    (*cfg_out)->codeMax = (uint32_t)((1u << numBits) - 1u);
+    (*cfg_out)->codeMin = 0u;
+}
+
+void destroyCaqQuantConfig(CaqEncodeConfig **cfg) {
+    if (cfg == NULL || *cfg == NULL) {
+        return;
+    }
+    free(*cfg);
+    *cfg = NULL;
 }
 
 // 调整量化编码以优化量化结果
-void codeAdjustment(const float *originalVector, CaqQuantCodeT *caq, const CaqQuantConfig *cfg) {
+void codeAdjustment(const float *originalVector, CaqQuantCodeT *caq, const CaqEncodeConfig *cfg) {
     float min = caq->min;
     double delta = caq->delta;
     uint32_t *codes = caq->codes;
@@ -161,7 +174,7 @@ void codeAdjustment(const float *originalVector, CaqQuantCodeT *caq, const CaqQu
     }
 }
 
-void encode(const float *originalVector, CaqQuantCodeT *caqCode, const CaqQuantConfig *cfg) {
+void encode(const float *originalVector, CaqQuantCodeT *caqCode, const CaqEncodeConfig *cfg) {
     // 清零状态，避免 caqCode 复用导致的数据遗留
     caqCode->max = 0.0f;
     caqCode->min = 0.0f;
@@ -247,3 +260,5 @@ void encode(const float *originalVector, CaqQuantCodeT *caqCode, const CaqQuantC
         caqCode->rescaleFactor = 0;
     }
 }
+
+#endif // ENCODER_H
