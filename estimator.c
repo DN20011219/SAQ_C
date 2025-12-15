@@ -91,12 +91,16 @@ int main(int argc, char **argv)
     CreateCaqQuantConfig(dim, numBits, &caqCfg);
 
     CaqScannerCtxT *scannerCtx = NULL;
-    createCaqScannerCtx(&scannerCtx);
+    CreateCaqScannerCtx(&scannerCtx);
 
     double absErrSum = 0.0;
     double relErrSum = 0.0;
     double maxAbsErr = 0.0;
     double maxRelErr = 0.0;
+    double restAbsErrSum = 0.0;
+    double restRelErrSum = 0.0;
+    double restMaxAbsErr = 0.0;
+    double restMaxRelErr = 0.0;
 
     DataItem *data_items = (DataItem *)calloc((size_t)data_count, sizeof(DataItem));
     if (!data_items) {
@@ -112,6 +116,7 @@ int main(int argc, char **argv)
     struct timespec t0, t1;
     double init_time_ms = 0.0;
     double estimate_time_ms = 0.0;
+    double rest_estimate_time_ms = 0.0;
     size_t loop_unstable_pairs = 0;   // 有非零差异的 pair 数
     float loop_max_abs_diff = 0.0f;   // 最大差异
 
@@ -155,9 +160,18 @@ int main(int argc, char **argv)
         clock_gettime(CLOCK_MONOTONIC, &t1);
         init_time_ms += elapsed_ms(t0, t1);
 
+        RestBitL2EstimatorCtxT *restCtx = NULL;
+        CreateRestBitL2EstimatorCtx(&restCtx,
+                                    dim,
+                                    numBits,
+                                    estimatorCtx->queryQuantCtx,
+                                    estimatorCtx->queryQuantCode,
+                                    scannerCtx);
+
         for (int i = 0; i < data_count; ++i) {
             clock_gettime(CLOCK_MONOTONIC, &t0);
-            float baselineEstimate = OneBitCaqEstimateDistance(estimatorCtx, data_items[i].oneBitCode);
+            float baselineEstimate;
+            OneBitCaqEstimateDistance(estimatorCtx, data_items[i].oneBitCode, &baselineEstimate);
             clock_gettime(CLOCK_MONOTONIC, &t1);
             estimate_time_ms += elapsed_ms(t0, t1);
             float trueDistance = FloatL2(data_items[i].data, query_items[q].query, dim);
@@ -169,12 +183,27 @@ int main(int argc, char **argv)
             if (absErr > maxAbsErr) maxAbsErr = absErr;
             if (relErr > maxRelErr) maxRelErr = relErr;
 
+            // RestBit 精排距离测试
+            clock_gettime(CLOCK_MONOTONIC, &t0);
+            float restDistance = 0.0f;
+            ResBitCaqEstimateDistance(restCtx, data_items[i].resBitCode, &restDistance);
+            clock_gettime(CLOCK_MONOTONIC, &t1);
+            rest_estimate_time_ms += elapsed_ms(t0, t1);
+
+            double restAbsErr = fabs((double)restDistance - (double)trueDistance);
+            double restRelErr = trueDistance ? restAbsErr / (double)trueDistance : 0.0;
+            restAbsErrSum += restAbsErr;
+            restRelErrSum += restRelErr;
+            if (restAbsErr > restMaxAbsErr) restMaxAbsErr = restAbsErr;
+            if (restRelErr > restMaxRelErr) restMaxRelErr = restRelErr;
+
             // LOOP 稳定性测试：多次重复估算并比较与 baseline 的差异
             if (loop_count > 1) {
                 int unstable = 0;
                 for (int l = 1; l < loop_count; ++l) {
                     clock_gettime(CLOCK_MONOTONIC, &t0);
-                    float e2 = OneBitCaqEstimateDistance(estimatorCtx, data_items[i].oneBitCode);
+                    float e2;
+                    OneBitCaqEstimateDistance(estimatorCtx, data_items[i].oneBitCode, &e2);
                     clock_gettime(CLOCK_MONOTONIC, &t1);
                     estimate_time_ms += elapsed_ms(t0, t1);
                     float diff = fabsf(e2 - baselineEstimate);
@@ -184,11 +213,14 @@ int main(int argc, char **argv)
                 if (unstable) loop_unstable_pairs++;
             }
         }
+        DestroyRestBitL2EstimatorCtx(&restCtx);
         OneBitCaqEstimatorDestroy(&estimatorCtx);
     }
     double denom = (double)data_count * (double)query_count;
     double meanAbsErr = absErrSum / denom;
     double meanRelErr = relErrSum / denom;
+    double restMeanAbsErr = restAbsErrSum / denom;
+    double restMeanRelErr = restRelErrSum / denom;
 
     printf("Data count: %d\n", data_count);
     printf("Query count: %d\n", query_count);
@@ -197,10 +229,15 @@ int main(int argc, char **argv)
     printf("Seed: %u\n", seed);
     printf("Init time (sum): %.3f ms\n", init_time_ms);
     printf("Estimate time (sum): %.3f ms\n", estimate_time_ms);
+    printf("Rest estimate time (sum): %.3f ms\n", rest_estimate_time_ms);
     if (loop_count > 1) {
         printf("Loop unstable pairs: %zu\n", loop_unstable_pairs);
         printf("Loop max abs diff: %.6f\n", loop_max_abs_diff);
     }
+    printf("Rest mean abs error: %.6f\n", (float)restMeanAbsErr);
+    printf("Rest mean rel error: %.6f\n", (float)restMeanRelErr);
+    printf("Rest max abs error: %.6f\n", (float)restMaxAbsErr);
+    printf("Rest max rel error: %.6f\n", (float)restMaxRelErr);
     printf("Mean abs error: %.6f\n", (float)meanAbsErr);
     printf("Mean rel error: %.6f\n", (float)meanRelErr);
     printf("Max abs error: %.6f\n", (float)maxAbsErr);
@@ -220,7 +257,7 @@ int main(int argc, char **argv)
     free(query_items);
     CaqQuantizerDestroy(&quantizerCtx);
     DestroyCaqQuantConfig(&caqCfg);
-    destroyCaqScannerCtx(&scannerCtx);
+    DestroyCaqScannerCtx(&scannerCtx);
     free(centroid);
     free(data);
     free(query);
