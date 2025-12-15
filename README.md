@@ -9,6 +9,8 @@
 ```bash
 cc -std=c11 -O2 encoder_example.c -lm -o encoder_example
 cc -std=c11 -O2 rotator_example.c -lm -o rotator_example
+cc -std=c11 -O2 quantizer_example.c -lm -o quantizer_example
+cc -std=c11 -O2 -mavx2 estimator.c -lm -o estimator  # AVX 优化路径
 ```
 
 ### 运行
@@ -16,7 +18,10 @@ cc -std=c11 -O2 rotator_example.c -lm -o rotator_example
 ```bash
 ./encoder_example
 ./rotator_example
+./estimator 20000 1 512 1234 10 # data数量 query数量 维度 随机种子 重复次数
 ```
+
+若编译环境未默认开启 AVX，可使用 `-mavx`（或 `-march=native`）启用，否则会退化到纯 C 路径或触发编译错误。
 
 # 移植差异说明
 
@@ -88,3 +93,4 @@ SAQ 1-bit (gist)    | Error Acc: 5.88780e-03 (diff=0.04%)    Fast: 1.5130e-01 (d
 ## 3. Query 编码器差异
 
 经过测试，本 query 量化器与原始 SAQ 仓库中量化结果完全一致。
+
