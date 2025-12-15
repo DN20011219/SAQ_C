@@ -1,5 +1,5 @@
-#ifndef QUANTIZER_H
-#define QUANTIZER_H
+#ifndef DATA_QUANTIZER_H
+#define DATA_QUANTIZER_H
 
 #include <stddef.h>
 #include <stdint.h>
@@ -43,10 +43,10 @@ void CaqQuantizerInit(L2CaqQuantizerCtxT **ctx,
     (*ctx)->residualVector = (float *)malloc(sizeof(float) * dim);  // 分配残差向量缓冲区
     (*ctx)->rotatedVector = (float *)malloc(sizeof(float) * dim);   // 分配旋转后向量缓冲区
     createRotatorMatrix(&(*ctx)->rotatorMatrix, dim);
-    createCaqQuantConfig(dim, numBits, &(*ctx)->encodeConfig);
+    CreateCaqQuantConfig(dim, numBits, &(*ctx)->encodeConfig);
 }
 
-void CaqQuantizationDestroy(L2CaqQuantizerCtxT **ctx) {
+void CaqQuantizerDestroy(L2CaqQuantizerCtxT **ctx) {
     if (ctx == NULL || *ctx == NULL) {
         return;
     }
@@ -59,7 +59,7 @@ void CaqQuantizationDestroy(L2CaqQuantizerCtxT **ctx) {
         (*ctx)->rotatedVector = NULL;
     }
     destroyRotatorMatrix(&(*ctx)->rotatorMatrix);
-    destroyCaqQuantConfig(&(*ctx)->encodeConfig);
+    DestroyCaqQuantConfig(&(*ctx)->encodeConfig);
     free(*ctx);
     *ctx = NULL;
 }
@@ -71,7 +71,7 @@ void CaqQuantizeVector(const L2CaqQuantizerCtxT *ctx,
     float *residualVector = ctx->residualVector;
     float *rotatedVector = ctx->rotatedVector;
 
-    createCaqQuantCode(outputCode, D);
+    CreateCaqQuantCode(outputCode, D);
 
     // Step 1: 计算残差向量
     for (size_t i = 0; i < D; ++i) {
@@ -82,9 +82,21 @@ void CaqQuantizeVector(const L2CaqQuantizerCtxT *ctx,
     rotateVector(ctx->rotatorMatrix, residualVector, rotatedVector, D);
 
     // Step 3: 量化编码
-    encode(rotatedVector, *outputCode, ctx->encodeConfig);
+    Encode(rotatedVector, *outputCode, ctx->encodeConfig);
 }
 
+void CaqSeparateStoredCodes(
+    const CaqEncodeConfig *cfg, 
+    const CaqQuantCodeT *caqCode,
+    CaqOneBitQuantCodeT **oneBitCode,
+    CaqResBitQuantCodeT **resBitCode
+) {
+    SeparateCode(
+        cfg,
+        caqCode,
+        oneBitCode,
+        resBitCode
+    );
+}
 
-
-#endif // QUANTIZER_H
+#endif // DATA_QUANTIZER_H

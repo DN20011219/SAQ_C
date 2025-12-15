@@ -1,5 +1,5 @@
-#ifndef QUANTIZER_H
-#define QUANTIZER_H
+#ifndef QUERY_QUANTIZER_H
+#define QUERY_QUANTIZER_H
 
 #include <stddef.h>
 #include <stdint.h>
@@ -7,11 +7,26 @@
 #include <math.h>
 #include <stdio.h>
 #include <stdbool.h>
+#include <stdio.h>
 
+#include "native_check.h"
 #include "encoder.h"
 #include "rotator.h"
 
+// 默认 query 量化使用 8 bit 以保障精度，可能会影响计算速度
 #define QUERY_QUANTIZER_NUM_BITS 8
+
+/**
+ * 使用 bitwise 进行 1bit 距离计算要求向量的量化编码布局必须是分离式布局（LAYOUT_SEPARATED）
+ * 即：所有维度的第 0 bit 存储在一起，所有维度的第 1 bit 存储在一起，依此类推
+ * 这样可以方便地使用位运算对所有维度的同一 bit进行并行计算
+ * 示例：
+ * [D 个 uint8_t，每个是 b bit] -> [b 个 bit-plane，每个 bit-plane 覆盖 D 个维度]
+ */
+typedef enum {
+    LAYOUT_SEPARATED = 1,
+    LAYOUT_INTERLEAVED = 2
+} QueryQuantizerLayoutT;
 /**
  * 在计算数据库向量与 query 向量距离时，SAQ 需要对 query 进行单独的量化处理，以加速距离计算
  * 其量化过程为一个简单的 LVQ 量化，主要包括：
@@ -25,6 +40,7 @@ typedef struct {
     float *rotatorMatrix;           // 随机正交矩阵指针，用于旋转向量
     float *residualVector;          // 用于存储残差向量的缓冲区指针，避免每次量化都分配内存
     float *rotatedVector;           // 用于存储旋转后向量的缓冲区指针，避免每次量化都分配内存
+    QueryQuantizerLayoutT layout;   // 量化编码布局
 } QueryQuantizerCtxT;
 
 void QueryQuantizerCtxInit(QueryQuantizerCtxT **ctx,
@@ -37,6 +53,11 @@ void QueryQuantizerCtxInit(QueryQuantizerCtxT **ctx,
     (*ctx)->rotatorMatrix = rotatorMatrix;
     (*ctx)->residualVector = (float *)malloc(sizeof(float) * dim);  // 分配残差向量缓冲区
     (*ctx)->rotatedVector = (float *)malloc(sizeof(float) * dim);   // 分配旋转后向量缓冲区
+#ifdef SIMD_MAX_CAPACITY
+    (*ctx)->layout = LAYOUT_SEPARATED;                              // 默认使用分离式布局，即 1bit 计算使用 bitwise 运算加速
+#else
+    (*ctx)->layout = LAYOUT_INTERLEAVED;                            // 若不支持 SIMD，则使用交错式布局
+#endif
 }
 
 void QueryQuantizerCtxDestroy(QueryQuantizerCtxT **ctx) {
@@ -89,7 +110,135 @@ void DestroyQueryQuantCode(QueryQuantCodeT **code) {
     *code = NULL;
 }
 
-void QueryQuantizeVector(const QueryQuantizerCtxT *ctx,
+#ifdef SIMD_MAX_CAPACITY
+void PrintCodesByDim(
+    const uint8_t *codes,
+    size_t dim,
+    size_t b  // 通常 = QUERY_QUANTIZER_NUM_BITS
+) {
+    for (size_t i = 0; i < dim; ++i) {
+        uint8_t val = codes[i];
+        printf("dim[%3zu]: ", i);
+        for (size_t bit = 0; bit < b; ++bit) {
+            // MSB -> LSB 打印
+            uint8_t v = (val >> (b - 1 - bit)) & 1u;
+            printf("%u", v);
+        }
+        printf("\n");
+    }
+}
+
+void PrintBitplanesLinearBits(
+    const uint8_t *bitplanes,
+    size_t b,
+    size_t numBlocks
+) {
+    const size_t BLOCK = SIMD_MAX_CAPACITY;          // 256
+    const size_t BYTES_PER_BLOCK = BLOCK / 8;        // 32
+    const size_t TOTAL_BITS = numBlocks * BLOCK;     // 总共多少 bits per plane
+
+    for (size_t p = 0; p < b; ++p) {
+        printf("Plane %zu (logical bit %zu):\n", p, p);
+
+        const uint8_t *plane =
+            bitplanes + p * (numBlocks * BYTES_PER_BLOCK);
+
+        // 按 bit 索引 0 到 TOTAL_BITS-1 顺序打印
+        for (size_t bit_idx = 0; bit_idx < TOTAL_BITS; ++bit_idx) {
+            size_t byte_id = bit_idx / 8;
+            size_t bit_in_byte = bit_idx % 8;   // 0 = LSB, 7 = MSB
+
+            uint8_t bit_val = (plane[byte_id] >> bit_in_byte) & 1u;
+            printf("%u", bit_val);
+
+            // 每 8 位加空格便于阅读
+            if ((bit_idx + 1) % 8 == 0) {
+                printf(" ");
+            }
+        }
+        printf("\n\n");
+    }
+}
+
+/**
+ * 在转置后，bitplanes 的存储格式为：
+ * [b 个 bit-plane，每个 bit-plane 覆盖 D 个维度]
+ * 每个 bit-plane 内部按 block 存储，每个 block 包含 SIMD_MAX_CAPACITY 个维度的 bit 数据
+ * 例如，对于 D=8，b=4 的情况，假设 SIMD_MAX_CAPACITY=8，则存储格式为：
+ * Plane 0: [dim0_bit0, dim1_bit0, ..., dim7_bit0]
+ * Plane 1: [dim0_bit1, dim1_bit1, ..., dim7_bit1]
+ * Plane 2: [dim0_bit2, dim1_bit2, ..., dim7_bit2]
+ * Plane 3: [dim0_bit3, dim1_bit3, ..., dim7_bit3]
+ * 这里的 bit0 是最高有效位 (MSB)，bit3 是最低有效位 (LSB)
+ * 例如，若一个维度的数字为 13 (二进制 1101)，则在 bit-plane 中的存储为：
+ * dimX_bit0 = 1, dimX_bit1 = 1, dimX_bit2 = 0, dimX_bit3 = 1
+ */
+void TransposeU8ToBitplanes(
+    const uint8_t *codes,   // [dim]
+    size_t dim,
+    size_t b,
+    size_t *outNumBlocks,
+    uint8_t **bitplanes     // 输出
+) {
+    const size_t BLOCK = SIMD_MAX_CAPACITY;      // 256
+    const size_t BYTES_PER_BLOCK = BLOCK / 8;    // 32
+
+    size_t numBlocks = (dim + BLOCK - 1) / BLOCK;
+    if (outNumBlocks) {
+        *outNumBlocks = numBlocks;
+    }
+
+    size_t totalBytes = b * numBlocks * BYTES_PER_BLOCK;
+
+    /* 分配一整块连续内存，并清零（保证自动补 0） */
+    uint8_t *buf = (uint8_t *)calloc(totalBytes, 1);
+    if (!buf) {
+        *bitplanes = NULL;
+        return;
+    }
+
+    /* 填充 bitplanes */
+    for (size_t blk = 0; blk < numBlocks; ++blk) {
+        size_t base = blk * BLOCK;
+
+        for (size_t bit = 0; bit < b; ++bit) {
+            /* plane-major + block */
+            uint8_t *dst =
+                buf + (b - 1 - bit) * (numBlocks * BYTES_PER_BLOCK)
+                    + blk * BYTES_PER_BLOCK;
+
+            for (size_t i = 0; i < BLOCK; ++i) {
+                size_t idx = base + i;
+                if (idx >= dim) break;
+
+                uint8_t v = (codes[idx] >> bit) & 1u;
+                if (v) {
+                    /* i=0 -> bit63, i=63 -> bit0 */
+                    size_t bitpos  = i;                 // 第几个维度就放在第几个 bit 上
+                    size_t byte_id = bitpos >> 3;       // i / 8
+                    size_t bit_id  = bitpos & 7;        // i % 8
+                    dst[byte_id] |= (uint8_t)(1u << bit_id);
+                }
+            }
+        }
+    }
+
+    *bitplanes = buf;
+}
+
+void FreeBitplanes(uint8_t **bitplanes, size_t b) {
+    if (!bitplanes) return;
+    for (size_t p = 0; p < b; ++p) {
+        free(bitplanes[p]);
+    }
+    free(bitplanes);
+}
+#endif // SIMD_MAX_CAPACITY
+
+/**
+ * TODO: QuantizeQueryVector 是查询时开销，因此 SIMD 加速应该是必须的
+ */
+void QuantizeQueryVector(const QueryQuantizerCtxT *ctx,
                        const float *inputVector,
                        QueryQuantCodeT **outputCode) {
     size_t D = ctx->dim;
@@ -144,8 +293,50 @@ void QueryQuantizeVector(const QueryQuantizerCtxT *ctx,
     (*outputCode)->residualQueryL2Sqr = l2Sqr;
     (*outputCode)->residualQueryL2Norm = sqrtf(l2Sqr);
     (*outputCode)->residualQuerySum = sum;
+
+    // Step 4: 根据布局调整量化编码存储方式
+#ifdef SIMD_MAX_CAPACITY
+    if (ctx->layout == LAYOUT_SEPARATED) {
+        // 分离式布局，需要将量化编码重新排列
+        size_t numBlocks = 0;
+        // PrintCodesByDim(
+        //     (*outputCode)->quantizedResidualQueryCodes,
+        //     D,
+        //     QUERY_QUANTIZER_NUM_BITS
+        // );
+        TransposeU8ToBitplanes(
+            (*outputCode)->quantizedResidualQueryCodes,
+            D,
+            QUERY_QUANTIZER_NUM_BITS,
+            &numBlocks,
+            &((*outputCode)->quantizedResidualQueryCodes)
+        );
+        // PrintBitplanesLinearBits(
+        //     (*outputCode)->quantizedResidualQueryCodes,
+        //     QUERY_QUANTIZER_NUM_BITS,
+        //     numBlocks
+        // );
+    } else if (ctx->layout == LAYOUT_INTERLEAVED) {
+        // 交错式布局，不需要额外处理
+    }
+#endif // SIMD_MAX_CAPACITY
 }
 
+/**
+ * 获取 query 量化编码在指定维度的值，若 layout 为 LAYOUT_SEPARATED，则不允许获取
+ */
+void GetQueryCodeValue(
+    const QueryQuantizerCtxT *outputCode,
+    const QueryQuantCodeT *queryCode,
+    size_t dimIndex,
+    uint32_t *value
+) {
+    if (outputCode->layout == LAYOUT_SEPARATED) {
+        // 分离式布局不支持按维度获取值
+        *value = 0;
+        return;
+    }
+    *value = (uint32_t)(queryCode->quantizedResidualQueryCodes[dimIndex]);
+}
 
-
-#endif // QUANTIZER_H
+#endif // QUERY_QUANTIZER_H
