@@ -6,24 +6,101 @@
 #include <stdlib.h>
 #include <math.h>
 #include <stdio.h>
+#include <string.h>
 
 #define ADJUST_ROUND_LIMIT 6
 #define ADJUST_EPSILON 1e-8f
 
+/**
+ * 量化最终结果为下面两个结构体，分别存储 1bit 编码和剩余 N-1 bit 编码
+ */
+typedef struct {
+    uint8_t* storedCodes;           // 每个维度的最高位 1bit 编码
+    float oriVecL2Norm;             // |o|, 放缩后的原始向量的 L2 范数
+} CaqOneBitQuantCodeT;
+typedef struct {
+    uint8_t* storedCodes;           // 除了最高位 1bit 外，其余低位 N-1 bit 编码
+    float rescaleFactor;            // 放缩因子，用于将量化向量还原到与原始向量相似的尺度
+} CaqResBitQuantCodeT;
+
+size_t getCaqOneBitQuantCodeSize(size_t dim) {
+#ifdef SIMD_MAX_CAPACITY
+    return GetBytesPerSimdBlock() * GetOneBitCodeSimdBlockNum(dim); // 按 SIMD 寄存器对齐分配存储空间
+#else
+    return (sizeof(uint8_t) * dim + 7) / 8;    // 按字节对齐分配存储空间
+#endif
+}
+
+size_t getCaqResBitQuantCodeSize(size_t dim, uint32_t resBits) {
+    return (sizeof(uint8_t) * dim * resBits + 7) / 8; // 按字节对齐分配存储空间
+}
+
+void CreateCaqOneBitQuantCode(CaqOneBitQuantCodeT **res, size_t dim) {
+    *res = (CaqOneBitQuantCodeT*)malloc(sizeof(CaqOneBitQuantCodeT));
+    if (*res == NULL) {
+        return;
+    }
+    size_t mallocSize = getCaqOneBitQuantCodeSize(dim);
+    (*res)->storedCodes = (uint8_t*)malloc(mallocSize);
+    (*res)->oriVecL2Norm = 0.0f;
+    memset((*res)->storedCodes, 0, mallocSize);
+}
+
+void CreateCaqResBitQuantCode(CaqResBitQuantCodeT **res, size_t dim, uint32_t resBits) {
+    *res = (CaqResBitQuantCodeT*)malloc(sizeof(CaqResBitQuantCodeT));
+    if (*res == NULL) {
+        return;
+    }
+    size_t mallocSize = getCaqResBitQuantCodeSize(dim, resBits);
+    (*res)->storedCodes = (uint8_t*)malloc(mallocSize);
+    (*res)->rescaleFactor = 0.0f;
+    memset((*res)->storedCodes, 0, mallocSize);
+}
+
+void DestroyCaqOneBitQuantCode(CaqOneBitQuantCodeT **code) {
+    if (code == NULL || *code == NULL) {
+        return;
+    }
+    if ((*code)->storedCodes) {
+        free((*code)->storedCodes);
+        (*code)->storedCodes = NULL;
+    }
+    free(*code);
+    *code = NULL;
+}
+
+void DestroyCaqResBitQuantCode(CaqResBitQuantCodeT **code) {
+    if (code == NULL || *code == NULL) {
+        return;
+    }
+    if ((*code)->storedCodes) {
+        free((*code)->storedCodes);
+        (*code)->storedCodes = NULL;
+    }
+    free(*code);
+    *code = NULL;
+}
+
+
+/**
+ * CaqQuantCodeT 是完整 N bit 量化编码结果的数据结构，仅用于量化过程中间结果存储
+ * 最终需要存储的量化编码请使用 CaqOneBitQuantCodeT 和 CaqResBitQuantCodeT 结构体
+ */
 typedef struct {
     float max;
     float min;
-    double delta;               // (max - min) / 2^b
-    uint32_t* codes;             // 量化过程给 32bit 用于编码，拆分模块做裁剪
-    float *floatCodes;          // 用于存储浮点型编码，便于后续调整
-    double quantizedVectorL2Sqr;      // |o_a|^2, 量化后向量的平方 L2 范数
-    double oriVecQuantVecIp; // <o, o_a>, 原始向量与量化后向量的内积
-    float oriVecL2Sqr;            // |o|^2, 原始向量的平方 L2 范数
-    float oriVecL2Norm;           // |o|, 原始向量的 L2 范数
-    float rescaleFactor;        // |o|^2 / <o, o_a>
+    double delta;                   // (max - min) / 2^b
+    uint32_t* codes;                // 量化过程给 32bit 用于编码，拆分模块做裁剪
+    uint8_t* storedCodes;           // 最终存储的量化编码，按实际 numBits 位数存储
+    float *floatCodes;              // 用于存储浮点型编码，便于后续调整
+    double quantizedVectorL2Sqr;    // |o_a|^2, 量化后向量的平方 L2 范数
+    double oriVecQuantVecIp;        // <o, o_a>, 原始向量与量化后向量的内积
+    float oriVecL2Sqr;              // |o|^2, 原始向量的平方 L2 范数
+    float oriVecL2Norm;             // |o|, 原始向量的 L2 范数
+    float rescaleFactor;            // |o|^2 / <o, o_a>
 } CaqQuantCodeT;
 
-void createCaqQuantCode(CaqQuantCodeT **res, size_t dim) {
+void CreateCaqQuantCode(CaqQuantCodeT **res, size_t dim) {
     *res = (CaqQuantCodeT*)malloc(sizeof(CaqQuantCodeT));
     if (*res == NULL) {
         return;
@@ -40,7 +117,7 @@ void createCaqQuantCode(CaqQuantCodeT **res, size_t dim) {
     (*res)->rescaleFactor = 0.0f;
 }
 
-void destroyCaqQuantCode(CaqQuantCodeT **caqCode) {
+void DestroyCaqQuantCode(CaqQuantCodeT **caqCode) {
     if (caqCode == NULL || *caqCode == NULL) {
         return;
     }
@@ -56,7 +133,7 @@ void destroyCaqQuantCode(CaqQuantCodeT **caqCode) {
     *caqCode = NULL;
 }
 
-void rescaleMaxToOne(CaqQuantCodeT *caqCode) {
+void RescaleMaxToOne(CaqQuantCodeT *caqCode) {
     if (caqCode == NULL) return;
     if (!caqCode->max) return;
     const double rescaleRate = 1.0f / (double)caqCode->max;
@@ -67,6 +144,9 @@ void rescaleMaxToOne(CaqQuantCodeT *caqCode) {
     caqCode->quantizedVectorL2Sqr = caqCode->quantizedVectorL2Sqr * rescaleRate * rescaleRate;
 }
 
+/**
+ * 一批向量使用相同的量化配置对象进行量化
+ */
 typedef struct {
     size_t dimPadded;            // 对齐后的维度
     size_t numBits;              // 每个维度量化为 numBits 位
@@ -76,8 +156,7 @@ typedef struct {
     uint32_t codeMin;            // 量化编码的最小值
 } CaqEncodeConfig;
 
-// 为一批向量创建一个公共的量化配置对象
-void createCaqQuantConfig(
+void CreateCaqQuantConfig(
     size_t dim, 
     size_t numBits,
     CaqEncodeConfig **cfg_out
@@ -91,7 +170,7 @@ void createCaqQuantConfig(
     (*cfg_out)->codeMin = 0u;
 }
 
-void destroyCaqQuantConfig(CaqEncodeConfig **cfg) {
+void DestroyCaqQuantConfig(CaqEncodeConfig **cfg) {
     if (cfg == NULL || *cfg == NULL) {
         return;
     }
@@ -100,7 +179,7 @@ void destroyCaqQuantConfig(CaqEncodeConfig **cfg) {
 }
 
 // 调整量化编码以优化量化结果
-void codeAdjustment(const float *originalVector, CaqQuantCodeT *caq, const CaqEncodeConfig *cfg) {
+void CodeAdjustment(const float *originalVector, CaqQuantCodeT *caq, const CaqEncodeConfig *cfg) {
     float min = caq->min;
     double delta = caq->delta;
     uint32_t *codes = caq->codes;
@@ -174,7 +253,7 @@ void codeAdjustment(const float *originalVector, CaqQuantCodeT *caq, const CaqEn
     }
 }
 
-void encode(const float *originalVector, CaqQuantCodeT *caqCode, const CaqEncodeConfig *cfg) {
+void Encode(const float *originalVector, CaqQuantCodeT *caqCode, const CaqEncodeConfig *cfg) {
     // 清零状态，避免 caqCode 复用导致的数据遗留
     caqCode->max = 0.0f;
     caqCode->min = 0.0f;
@@ -247,17 +326,54 @@ void encode(const float *originalVector, CaqQuantCodeT *caqCode, const CaqEncode
 
     // 只有在非全零向量的情况下，才进行后续的编码调整
     if (caqCode->quantizedVectorL2Sqr) {
-        codeAdjustment(originalVector, caqCode, cfg);
+        CodeAdjustment(originalVector, caqCode, cfg);
     }
 
     // 将值域放缩到 [-1, 1] 范围内，便于后续计算
-    rescaleMaxToOne(caqCode);
+    RescaleMaxToOne(caqCode);
 
     caqCode->oriVecL2Norm = (float)sqrt((double)caqCode->oriVecL2Sqr);
     if (caqCode->oriVecQuantVecIp) {
         caqCode->rescaleFactor = caqCode->oriVecL2Sqr / caqCode->oriVecQuantVecIp; // rescaleFactor = ||o||^2 / <o, o_a> * v_mx
     } else {
         caqCode->rescaleFactor = 0;
+    }
+}
+
+// 将完整的每个维度 N bit 量化编码拆分为每个维度 1 bit 和 N-1 bit 两部分进行存储
+void SeparateCode(
+    const CaqEncodeConfig *cfg,
+    const CaqQuantCodeT *caqCode,
+    CaqOneBitQuantCodeT **oneBitCode,
+    CaqResBitQuantCodeT **resBitCode
+) {
+    CreateCaqOneBitQuantCode(oneBitCode, cfg->dimPadded);
+    CreateCaqResBitQuantCode(resBitCode, cfg->dimPadded, cfg->numBits - 1);
+    CaqOneBitQuantCodeT *oneBit = *oneBitCode;
+    CaqResBitQuantCodeT *resBit = *resBitCode;
+    oneBit->oriVecL2Norm = caqCode->oriVecL2Norm;
+    resBit->rescaleFactor = caqCode->rescaleFactor;
+    uint32_t numBits = (uint32_t)cfg->numBits;
+    uint32_t resBits = numBits - 1;
+    
+    for (size_t i = 0; i < cfg->dimPadded; ++i) {
+        uint32_t code = caqCode->codes[i];
+        uint8_t highBit = (uint8_t)((code >> resBits) & 1);       // 取最高位
+        uint32_t lowBits = code & ((1u << resBits) - 1u);         // 取低 N-1 位
+
+        // 存储最高位 1bit
+        size_t byteIdx1 = i / 8;
+        size_t bitIdx1 = i % 8;
+        oneBit->storedCodes[byteIdx1] |= (highBit << bitIdx1);
+
+        // 存储低位 N-1 bit
+        for (uint32_t b = 0; b < resBits; ++b) {
+            uint8_t bitVal = (lowBits >> b) & 1;
+            size_t bitPos = i * resBits + b;
+            size_t byteIdx = bitPos / 8;
+            size_t bitIdx = bitPos % 8;
+            resBit->storedCodes[byteIdx] |= (bitVal << bitIdx);
+        }
     }
 }
 
