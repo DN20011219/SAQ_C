@@ -8,6 +8,8 @@
 #include <stdio.h>
 #include <stdbool.h>
 
+#include "native_check.h"
+
 // #define Haar_Random_Orthogonal_Matrix
 #define Householder_Random_Orthogonal_Matrix
 
@@ -183,14 +185,94 @@ void destroyRotatorMatrix(float **P)
     }
 }
 
-// 使用矩阵 P 旋转向量 vec_in，结果存入 vec_out
-void rotateVector(const float* P, const float* vec_in, float* vec_out, size_t D) {
-    for (size_t i = 0; i < D; i++) {
+#if (defined(__x86_64__) && defined(__AVX__))
+
+void rotateVector(
+    const float* P,
+    const float* vec_in,
+    float* vec_out,
+    size_t D
+) {
+    const size_t simd_width = SIMD_MAX_CAPACITY / 32; // 8 floats
+
+    for (size_t i = 0; i < D; ++i) {
+        __m256 acc = _mm256_setzero_ps();
+
+        size_t j = 0;
+        for (; j + simd_width <= D; j += simd_width) {
+            __m256 p = _mm256_loadu_ps(&P[i * D + j]);
+            __m256 v = _mm256_loadu_ps(&vec_in[j]);
+            acc = _mm256_add_ps(acc, _mm256_mul_ps(p, v));
+        }
+
+        // horizontal sum
+        __m128 lo = _mm256_castps256_ps128(acc);
+        __m128 hi = _mm256_extractf128_ps(acc, 1);
+        __m128 sum128 = _mm_add_ps(lo, hi);
+        sum128 = _mm_hadd_ps(sum128, sum128);
+        sum128 = _mm_hadd_ps(sum128, sum128);
+
+        float sum = _mm_cvtss_f32(sum128);
+
+        // tail
+        for (; j < D; ++j)
+            sum += P[i * D + j] * vec_in[j];
+
+        vec_out[i] = sum;
+    }
+}
+
+#elif (defined(__aarch64__) && defined(__ARM_NEON))
+void rotateVector(
+    const float* P,
+    const float* vec_in,
+    float* vec_out,
+    size_t D
+) {
+    const size_t simd_width = SIMD_MAX_CAPACITY / 32; // 4 floats
+
+    for (size_t i = 0; i < D; ++i) {
+        float32x4_t acc = vdupq_n_f32(0.0f);
+
+        size_t j = 0;
+        for (; j + simd_width <= D; j += simd_width) {
+            float32x4_t p = vld1q_f32(&P[i * D + j]);
+            float32x4_t v = vld1q_f32(&vec_in[j]);
+            acc = vmlaq_f32(acc, p, v);
+        }
+
+        // horizontal sum
+        float32x2_t sum2 = vadd_f32(vget_low_f32(acc),
+                                    vget_high_f32(acc));
+        float sum = vget_lane_f32(sum2, 0) +
+                    vget_lane_f32(sum2, 1);
+
+        // tail
+        for (; j < D; ++j)
+            sum += P[i * D + j] * vec_in[j];
+
+        vec_out[i] = sum;
+    }
+}
+
+#else
+
+// 无 SIMD 实现，旋转向量vec_in
+void rotateVector(
+    const float* P,
+    const float* vec_in,
+    float* vec_out,
+    size_t D
+) {
+    for (size_t i = 0; i < D; ++i) {
         float s = 0.0f;
-        for (size_t j = 0; j < D; j++)
+        for (size_t j = 0; j < D; ++j)
             s += P[i * D + j] * vec_in[j];
         vec_out[i] = s;
     }
 }
+
+#endif
+
 
 #endif // ROTATOR_H
