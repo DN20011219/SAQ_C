@@ -9,12 +9,25 @@
 #include <stdbool.h>
 #include <stdio.h>
 
+// #define QUERY_QUANTIZER_PROFILE
+#ifdef QUERY_QUANTIZER_PROFILE
+#include <time.h>
+#endif
+
 #include "native_check.h"
 #include "encoder.h"
 #include "rotator.h"
 
 // 默认 query 量化使用 8 bit 以保障精度，可能会影响计算速度
 #define QUERY_QUANTIZER_NUM_BITS 8
+
+#ifdef QUERY_QUANTIZER_PROFILE
+static inline int64_t QueryQuantizerDiffNs(const struct timespec *start,
+                         const struct timespec *end) {
+    return (end->tv_sec - start->tv_sec) * 1000000000ll +
+        (end->tv_nsec - start->tv_nsec);
+}
+#endif
 
 /**
  * 使用 bitwise 进行 1bit 距离计算要求向量的量化编码布局必须是分离式布局（LAYOUT_SEPARATED）
@@ -271,16 +284,30 @@ void QuantizeQueryVector(const QueryQuantizerCtxT *ctx,
     float *rotatorMatrix = ctx->rotatorMatrix;
     float *residualVector = ctx->residualVector;
     float *rotatedVector = ctx->rotatedVector;
+#ifdef QUERY_QUANTIZER_PROFILE
+    struct timespec t_start, t_after_init, t_after_residual, t_after_rotate,
+        t_after_range, t_after_quant, t_after_layout;
+    clock_gettime(CLOCK_MONOTONIC, &t_start);
+#endif
     
     CreateQueryQuantCode(outputCode, D);
+#ifdef QUERY_QUANTIZER_PROFILE
+    clock_gettime(CLOCK_MONOTONIC, &t_after_init);
+#endif
 
     // Step 1: 计算残差向量
     for (size_t i = 0; i < D; ++i) {
         residualVector[i] = inputVector[i] - centroid[i];
     }
+#ifdef QUERY_QUANTIZER_PROFILE
+    clock_gettime(CLOCK_MONOTONIC, &t_after_residual);
+#endif
 
     // Step 2: 旋转向量
     rotateVector(ctx->rotatorMatrix, residualVector, rotatedVector, D);
+#ifdef QUERY_QUANTIZER_PROFILE
+    clock_gettime(CLOCK_MONOTONIC, &t_after_rotate);
+#endif
 
     // Step 3: 量化编码
     // 3.1 确定值域 [min, max]
@@ -300,6 +327,9 @@ void QuantizeQueryVector(const QueryQuantizerCtxT *ctx,
     // 3.2 计算量化步长 delta
     float delta = (maxVal - minVal) / ((1 << QUERY_QUANTIZER_NUM_BITS) - 0.01);
     (*outputCode)->delta = delta;
+#ifdef QUERY_QUANTIZER_PROFILE
+    clock_gettime(CLOCK_MONOTONIC, &t_after_range);
+#endif
 
     // 3.3 量化编码
     float l2Sqr = 0.0f;
@@ -322,33 +352,48 @@ void QuantizeQueryVector(const QueryQuantizerCtxT *ctx,
     (*outputCode)->residualQueryL2Norm = sqrtf(l2Sqr);
     (*outputCode)->residualQuerySum = sum;
     (*outputCode)->quantizedQuerySum = codeSum;
+#ifdef QUERY_QUANTIZER_PROFILE
+    clock_gettime(CLOCK_MONOTONIC, &t_after_quant);
+#endif
 
     // Step 4: 根据布局调整量化编码存储方式
 #ifdef SIMD_MAX_CAPACITY
-    // if (ctx->layout == LAYOUT_SEPARATED) {
         // 分离式布局，需要将量化编码重新排列
-        size_t numBlocks = 0;
-        // PrintCodesByDim(
-        //     (*outputCode)->quantizedQuerySepCodes,
-        //     D,
-        //     QUERY_QUANTIZER_NUM_BITS
-        // );
-        TransposeU8ToBitplanes(
-            (*outputCode)->quantizedQueryOriCodes,
-            D,
-            QUERY_QUANTIZER_NUM_BITS,
-            &numBlocks,
-            &((*outputCode)->quantizedQuerySepCodes)
-        );
-        // PrintBitplanesLinearBits(
-        //     (*outputCode)->quantizedQuerySepCodes,
-        //     QUERY_QUANTIZER_NUM_BITS,
-        //     numBlocks
-        // );
-    // } else if (ctx->layout == LAYOUT_INTERLEAVED) {
-    //     // 交错式布局，不需要额外处理
-    // }
-#endif // SIMD_MAX_CAPACITY
+    size_t numBlocks = 0;
+    TransposeU8ToBitplanes(
+        (*outputCode)->quantizedQueryOriCodes,
+        D,
+        QUERY_QUANTIZER_NUM_BITS,
+        &numBlocks,
+        &((*outputCode)->quantizedQuerySepCodes)
+    );
+#ifdef QUERY_QUANTIZER_PROFILE
+    clock_gettime(CLOCK_MONOTONIC, &t_after_layout);
+#endif
+#endif
+#ifdef QUERY_QUANTIZER_PROFILE
+#ifndef SIMD_MAX_CAPACITY
+    t_after_layout = t_after_quant;
+#endif
+    int64_t total_ns = QueryQuantizerDiffNs(&t_start, &t_after_layout);
+    if (total_ns > 0) {
+        int64_t init_ns = QueryQuantizerDiffNs(&t_start, &t_after_init);
+        int64_t residual_ns = QueryQuantizerDiffNs(&t_after_init, &t_after_residual);
+        int64_t rotate_ns = QueryQuantizerDiffNs(&t_after_residual, &t_after_rotate);
+        int64_t range_ns = QueryQuantizerDiffNs(&t_after_rotate, &t_after_range);
+        int64_t quant_ns = QueryQuantizerDiffNs(&t_after_range, &t_after_quant);
+        int64_t layout_ns = QueryQuantizerDiffNs(&t_after_quant, &t_after_layout);
+
+        printf("QuantizeQueryVector timing: total=%.3f ms | init %.2f%% (%.3f ms) | residual %.2f%% (%.3f ms) | rotate %.2f%% (%.3f ms) | range %.2f%% (%.3f ms) | quantize %.2f%% (%.3f ms) | layout %.2f%% (%.3f ms)\n",
+               (double)total_ns / 1e6,
+               init_ns * 100.0 / total_ns, (double)init_ns / 1e6,
+               residual_ns * 100.0 / total_ns, (double)residual_ns / 1e6,
+               rotate_ns * 100.0 / total_ns, (double)rotate_ns / 1e6,
+               range_ns * 100.0 / total_ns, (double)range_ns / 1e6,
+               quant_ns * 100.0 / total_ns, (double)quant_ns / 1e6,
+               layout_ns * 100.0 / total_ns, (double)layout_ns / 1e6);
+    }
+#endif // QUERY_QUANTIZER_PROFILE
 }
 
 /**
