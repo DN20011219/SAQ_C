@@ -19,10 +19,14 @@ set_property(CACHE SIMD PROPERTY STRINGS AUTO NONE AVX NEON)
 # Collect common sources and include directories
 include_directories(${CMAKE_CURRENT_SOURCE_DIR})
 
+# Ensure POSIX APIs like clock_gettime are declared
+add_compile_definitions(_POSIX_C_SOURCE=200809L)
+add_compile_definitions(_XOPEN_SOURCE=700)
+
 # Apply SIMD-specific compile options
 set(SAQ_SIMD_COMPILE_OPTIONS "")
 if(SIMD STREQUAL "AVX")
-  list(APPEND SAQ_SIMD_COMPILE_OPTIONS -mavx)
+  list(APPEND SAQ_SIMD_COMPILE_OPTIONS -mavx -mavx2)
 elseif(SIMD STREQUAL "NEON")
   if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
     # On aarch64, NEON is baseline; no extra flags typically required
@@ -33,6 +37,11 @@ elseif(SIMD STREQUAL "NONE")
   # No SIMD flags
 else()
   # AUTO: leave it to the compiler or user env
+endif()
+
+# High-performance compiler switches (Release config only)
+if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+  list(APPEND SAQ_SIMD_COMPILE_OPTIONS -O3 -funroll-loops)
 endif()
 
 # Helper to add executable with common flags and link libs
