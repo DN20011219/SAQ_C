@@ -51,7 +51,7 @@ typedef struct {
 
 int main(int argc, char **argv)
 {
-    const size_t numBits = 9;
+    const size_t numBits = 9;// 固定为 9 bit 量化
     size_t dim = 512;
     int data_count = 100000; // 10W级别
     int query_count = 100;   // 100-1000

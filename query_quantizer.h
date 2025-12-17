@@ -23,10 +23,10 @@
  * 示例：
  * [D 个 uint8_t，每个是 b bit] -> [b 个 bit-plane，每个 bit-plane 覆盖 D 个维度]
  */
-typedef enum {
-    LAYOUT_SEPARATED = 1,
-    LAYOUT_INTERLEAVED = 2
-} QueryQuantizerLayoutT;
+// typedef enum {
+//     LAYOUT_SEPARATED = 1,
+//     LAYOUT_INTERLEAVED = 2
+// } QueryQuantizerLayoutT;
 /**
  * 在计算数据库向量与 query 向量距离时，SAQ 需要对 query 进行单独的量化处理，以加速距离计算
  * 其量化过程为一个简单的 LVQ 量化，主要包括：
@@ -40,8 +40,24 @@ typedef struct {
     float *rotatorMatrix;           // 随机正交矩阵指针，用于旋转向量
     float *residualVector;          // 用于存储残差向量的缓冲区指针，避免每次量化都分配内存
     float *rotatedVector;           // 用于存储旋转后向量的缓冲区指针，避免每次量化都分配内存
-    QueryQuantizerLayoutT layout;   // 量化编码布局
+    // QueryQuantizerLayoutT layout;   // 量化编码布局
 } QueryQuantizerCtxT;
+
+void GetCodesBytesSize(
+    size_t dim,
+    size_t *sepCodesSize,
+    size_t *oriCodesSize
+) {
+    *sepCodesSize = 0;
+#ifdef SIMD_MAX_CAPACITY
+    const size_t BLOCK = SIMD_MAX_CAPACITY;      // 256 或 128
+    const size_t BYTES_PER_BLOCK = BLOCK / 8;    // 32 或 16
+    size_t numBlocks = (dim + BLOCK - 1) / BLOCK;
+    *sepCodesSize = QUERY_QUANTIZER_NUM_BITS * numBlocks * BYTES_PER_BLOCK;     // 分离式布局，每个 bit plane 与 SIMD 寄存器大小对齐
+#endif
+    static_assert(QUERY_QUANTIZER_NUM_BITS <= 8, "QUERY_QUANTIZER_NUM_BITS must be <= 8");
+    *oriCodesSize = dim * sizeof(uint8_t);                      // 交错式布局，每个维度一个 uint8_t
+}
 
 void QueryQuantizerCtxInit(QueryQuantizerCtxT **ctx,
                          size_t dim,
@@ -53,11 +69,6 @@ void QueryQuantizerCtxInit(QueryQuantizerCtxT **ctx,
     (*ctx)->rotatorMatrix = rotatorMatrix;
     (*ctx)->residualVector = (float *)malloc(sizeof(float) * dim);  // 分配残差向量缓冲区
     (*ctx)->rotatedVector = (float *)malloc(sizeof(float) * dim);   // 分配旋转后向量缓冲区
-#ifdef SIMD_MAX_CAPACITY
-    (*ctx)->layout = LAYOUT_SEPARATED;                              // 默认使用分离式布局，即 1bit 计算使用 bitwise 运算加速
-#else
-    (*ctx)->layout = LAYOUT_INTERLEAVED;                            // 若不支持 SIMD，则使用交错式布局
-#endif
 }
 
 void QueryQuantizerCtxDestroy(QueryQuantizerCtxT **ctx) {
@@ -78,33 +89,47 @@ void QueryQuantizerCtxDestroy(QueryQuantizerCtxT **ctx) {
 
 
 typedef struct {
-    uint8_t *quantizedResidualQueryCodes;   // 量化编码结果指针
+    uint8_t *quantizedQuerySepCodes;        // 量化编码结果指针，使用分离式布局存储，即每个 bit-plane 存储所有维度的对应 bit
+    uint8_t *quantizedQueryOriCodes;        // 量化编码结果指针，使用原始交错式布局存储，即每个维度的所有 bit 存储在一起
     float residualQueryMin;                 // 残差查询向量的最小值
     float residualQueryMax;                 // 残差查询向量的最大值
     float delta;                            // 量化步长
     float residualQueryL2Sqr;               // 残差查询向量的平方 L2 范数
     float residualQueryL2Norm;              // 残差查询向量的 L2 范数
     float residualQuerySum;                 // 残差查询向量的元素和
+    uint64_t quantizedQuerySum;             // 量化后整型编码 qi 的元素和（缓存 sum_qi）
 } QueryQuantCodeT;
 
 void CreateQueryQuantCode(QueryQuantCodeT **code, size_t dim) {
     *code = (QueryQuantCodeT *)malloc(sizeof(QueryQuantCodeT));
-    (*code)->quantizedResidualQueryCodes = (uint8_t *)malloc(sizeof(uint8_t) * dim);
+    size_t sepCodesLen, oriCodesLen;
+    GetCodesBytesSize(dim, &sepCodesLen, &oriCodesLen);
+#ifdef SIMD_MAX_CAPACITY
+    (*code)->quantizedQuerySepCodes = (uint8_t *)malloc(sizeof(uint8_t) * sepCodesLen); // 分离式布局仅在支持 SIMD 时使用
+#else
+    (*code)->quantizedQuerySepCodes = NULL;
+#endif
+    (*code)->quantizedQueryOriCodes = (uint8_t *)malloc(sizeof(uint8_t) * oriCodesLen);
     (*code)->residualQueryMin = 0.0f;
     (*code)->residualQueryMax = 0.0f;
     (*code)->delta = 0.0f;
     (*code)->residualQueryL2Sqr = 0.0f;
     (*code)->residualQueryL2Norm = 0.0f;
     (*code)->residualQuerySum = 0.0f;
+    (*code)->quantizedQuerySum = 0ull;
 }
 
 void DestroyQueryQuantCode(QueryQuantCodeT **code) {
     if (code == NULL || *code == NULL) {
         return;
     }
-    if ((*code)->quantizedResidualQueryCodes) {
-        free((*code)->quantizedResidualQueryCodes);
-        (*code)->quantizedResidualQueryCodes = NULL;
+    if ((*code)->quantizedQuerySepCodes) {
+        free((*code)->quantizedQuerySepCodes);
+        (*code)->quantizedQuerySepCodes = NULL;
+    }
+    if ((*code)->quantizedQueryOriCodes) {
+        free((*code)->quantizedQueryOriCodes);
+        (*code)->quantizedQueryOriCodes = NULL;
     }
     free(*code);
     *code = NULL;
@@ -174,7 +199,7 @@ void PrintBitplanesLinearBits(
  * dimX_bit0 = 1, dimX_bit1 = 1, dimX_bit2 = 0, dimX_bit3 = 1
  */
 void TransposeU8ToBitplanes(
-    const uint8_t *codes,   // [dim]
+    const uint8_t *codes,
     size_t dim,
     size_t b,
     size_t *outNumBlocks,
@@ -279,6 +304,7 @@ void QuantizeQueryVector(const QueryQuantizerCtxT *ctx,
     // 3.3 量化编码
     float l2Sqr = 0.0f;
     float sum = 0.0f;
+    uint64_t codeSum = 0ull;
     uint8_t maxCode = (1u << QUERY_QUANTIZER_NUM_BITS) - 1;
     for (size_t i = 0; i < D; ++i) {
         float val = rotatedVector[i];
@@ -286,57 +312,75 @@ void QuantizeQueryVector(const QueryQuantizerCtxT *ctx,
         if (q < 0.0f) q = 0.0f;                     // 下限
         if (q > (float)maxCode) q = (float)maxCode; // 上限
         uint8_t code = (uint8_t)floorf(q);          // cast<uint8_t>()
-        (*outputCode)->quantizedResidualQueryCodes[i] = code;
+        // 非 SIMD 情况下仅使用按维度交错存储的编码；SIMD 情况稍后转置为按 plane 存储
+        (*outputCode)->quantizedQueryOriCodes[i] = code;
         l2Sqr += val * val;                         
-        sum += val;                               
+        sum += val;
+        codeSum += (uint64_t)code;                 // 累加量化整型编码的元素和
     }
     (*outputCode)->residualQueryL2Sqr = l2Sqr;
     (*outputCode)->residualQueryL2Norm = sqrtf(l2Sqr);
     (*outputCode)->residualQuerySum = sum;
+    (*outputCode)->quantizedQuerySum = codeSum;
 
     // Step 4: 根据布局调整量化编码存储方式
 #ifdef SIMD_MAX_CAPACITY
-    if (ctx->layout == LAYOUT_SEPARATED) {
+    // if (ctx->layout == LAYOUT_SEPARATED) {
         // 分离式布局，需要将量化编码重新排列
         size_t numBlocks = 0;
         // PrintCodesByDim(
-        //     (*outputCode)->quantizedResidualQueryCodes,
+        //     (*outputCode)->quantizedQuerySepCodes,
         //     D,
         //     QUERY_QUANTIZER_NUM_BITS
         // );
         TransposeU8ToBitplanes(
-            (*outputCode)->quantizedResidualQueryCodes,
+            (*outputCode)->quantizedQueryOriCodes,
             D,
             QUERY_QUANTIZER_NUM_BITS,
             &numBlocks,
-            &((*outputCode)->quantizedResidualQueryCodes)
+            &((*outputCode)->quantizedQuerySepCodes)
         );
         // PrintBitplanesLinearBits(
-        //     (*outputCode)->quantizedResidualQueryCodes,
+        //     (*outputCode)->quantizedQuerySepCodes,
         //     QUERY_QUANTIZER_NUM_BITS,
         //     numBlocks
         // );
-    } else if (ctx->layout == LAYOUT_INTERLEAVED) {
-        // 交错式布局，不需要额外处理
-    }
+    // } else if (ctx->layout == LAYOUT_INTERLEAVED) {
+    //     // 交错式布局，不需要额外处理
+    // }
 #endif // SIMD_MAX_CAPACITY
 }
 
 /**
- * 获取 query 量化编码在指定维度的值，若 layout 为 LAYOUT_SEPARATED，则不允许获取
+ * 获取 query 量化编码在指定维度的原始布局的值
  */
-void GetQueryCodeValue(
+void GetOriQueryCodeValue(
     const QueryQuantizerCtxT *outputCode,
     const QueryQuantCodeT *queryCode,
     size_t dimIndex,
     uint32_t *value
 ) {
-    if (outputCode->layout == LAYOUT_SEPARATED) {
-        // 分离式布局不支持按维度获取值
-        *value = 0;
-        return;
-    }
-    *value = (uint32_t)(queryCode->quantizedResidualQueryCodes[dimIndex]);
+    uint8_t val = queryCode->quantizedQueryOriCodes[dimIndex];
+    *value = (uint32_t)(val);
 }
+
+#ifdef SIMD_MAX_CAPACITY
+/**
+ * 获取 query 量化编码在指定维度块和 bit 平面的指针（分离式布局）
+ */
+void GetSepQueryCodeValue(
+    const QueryQuantizerCtxT *quantizerCtx,
+    const QueryQuantCodeT *queryCode,
+    size_t planeIndex,
+    size_t blockIndex,
+    uint8_t **value
+) {
+    size_t BlockNum = GetOneBitCodeSimdBlockNum(quantizerCtx->dim);
+    size_t bytesPerBlock = GetBytesPerSimdBlock();
+    size_t bytesPerPlane = bytesPerBlock * BlockNum; // 一整个 bitplane 的字节跨度
+    *value = queryCode->quantizedQuerySepCodes + planeIndex * bytesPerPlane +
+                blockIndex * GetBytesPerSimdBlock();
+}
+#endif
 
 #endif // QUERY_QUANTIZER_H

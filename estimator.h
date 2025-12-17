@@ -24,8 +24,8 @@
 typedef struct {
     // TODO：向量 1bit 内积缓存 MAP，避免 1bit 内积重复计算
     // TODO: 向量 L2 范数缓存 MAP，避免重复计算
-    double IpDummy;     // 占位符
-    double L2NormDummy; // 占位符
+    float IpDummy;     // 占位符
+    float L2NormDummy; // 占位符
 } CaqScannerCtxT;
 
 void CreateCaqScannerCtx(CaqScannerCtxT **ctx) {
@@ -185,83 +185,261 @@ void DestroyRestBitL2EstimatorCtx(RestBitL2EstimatorCtxT **ctx) {
  * 3. 若均不支持，则使用普通 C 语言实现，该实现无需 QueryQuantizerLayoutT::LAYOUT_SEPARATED 布局支持
  */
 #if (defined(__x86_64__) && defined(__AVX__))
+#include <immintrin.h>
+
+float estimateOneBitIp(
+    const OneBitL2CaqEstimatorCtxT *ctx,
+    const CaqOneBitQuantCodeT *dataCaqCode
+) {
+    // 纯 AVX ：使用 128-bit SSE2 对 32B block 分两半处理
+    size_t BlockNum = GetOneBitCodeSimdBlockNum(ctx->dim);
+    size_t bytesPerBlock = GetBytesPerSimdBlock(); // 32 bytes
+    const QueryQuantCodeT *queryCode = ctx->queryQuantCode;
+    uint64_t ipEstimate = 0;
+    uint64_t ppcScalar = 0;
+    uint64_t tmp64[2]; // 存放 16B AND 结果，便于 popcount
+    uint8_t *qBlock;
+
+    for (int j = 0; j < (int)BlockNum; ++j) {
+        const uint8_t *dBlock = dataCaqCode->storedCodes + j * bytesPerBlock;
+        // 统计当前 block 的 1bit 编码中 1 的个数
+        // for (int k = 0; k < 4; ++k) { // 循环展开优化
+        ppcScalar += __builtin_popcountll(((const uint64_t*)dBlock)[0]);
+        ppcScalar += __builtin_popcountll(((const uint64_t*)dBlock)[1]);
+        ppcScalar += __builtin_popcountll(((const uint64_t*)dBlock)[2]);
+        ppcScalar += __builtin_popcountll(((const uint64_t*)dBlock)[3]);
+        // }
+        for (int plane = 0; plane < QUERY_QUANTIZER_NUM_BITS; ++plane) {
+            uint64_t partialIp = 0;
+
+            GetSepQueryCodeValue(ctx->queryQuantCtx, ctx->queryQuantCode, plane, j, &qBlock);
+
+            // 低 16 字节
+            __m128i q_lo = _mm_loadu_si128((const __m128i *)(qBlock));
+            __m128i d_lo = _mm_loadu_si128((const __m128i *)(dBlock));
+            __m128i a_lo = _mm_and_si128(q_lo, d_lo);
+            _mm_storeu_si128((__m128i *)tmp64, a_lo);
+            partialIp += (uint64_t)__builtin_popcountll(tmp64[0]) + (uint64_t)__builtin_popcountll(tmp64[1]);
+
+            // 高 16 字节
+            __m128i q_hi = _mm_loadu_si128((const __m128i *)(qBlock + 16));
+            __m128i d_hi = _mm_loadu_si128((const __m128i *)(dBlock + 16));
+            __m128i a_hi = _mm_and_si128(q_hi, d_hi);
+            _mm_storeu_si128((__m128i *)tmp64, a_hi);
+            partialIp += (uint64_t)__builtin_popcountll(tmp64[0]) + (uint64_t)__builtin_popcountll(tmp64[1]);
+
+            ipEstimate += partialIp * (1ULL << (QUERY_QUANTIZER_NUM_BITS - plane - 1));
+        }
+    }
+
+    return queryCode->delta * (float)ipEstimate +
+           (queryCode->residualQueryMin + 0.5f * queryCode->delta) * (float)ppcScalar;
+}
+
+/**
+ * AVX 加速版本：计算低位编码与解码后的 query 的内积
+ * ip = sum_i [ ((q_i + 0.5) * qDelta + qMin) * dlow_i ]
+ */
+void InnerProductU8U8(
+    const RestBitL2EstimatorCtxT *ctx,
+    const CaqResBitQuantCodeT *dataCaqCode,
+    float *resultOut
+) {
+    // 使用 SSE2 128-bit 整数路径在循环内计算 sum(q*d) 与 sum(d)
+    // 再在循环外一次性解码并组合
+    size_t D = ctx->dim;
+    const QueryQuantCodeT *queryCode = ctx->queryQuantCode;
+    const uint8_t *qCodes = queryCode->quantizedQueryOriCodes;
+    const uint8_t *dCodes = dataCaqCode->storedCodes;
+
+    __m128i accQD = _mm_setzero_si128(); // 4 x int32 局部累加器
+    __m128i accD  = _mm_setzero_si128(); // 4 x int32 局部累加器
+    const __m128i zero = _mm_setzero_si128();
+    const __m128i ones = _mm_set1_epi16(1);
+
+    size_t i = 0;
+    for (; i + 16 <= D; i += 16) {
+        __m128i q8 = _mm_loadu_si128((const __m128i *)(qCodes + i));
+        __m128i d8 = _mm_loadu_si128((const __m128i *)(dCodes + i));
+
+        // 拆分为 16-bit
+        __m128i q16_lo = _mm_unpacklo_epi8(q8, zero);
+        __m128i q16_hi = _mm_unpackhi_epi8(q8, zero);
+        __m128i d16_lo = _mm_unpacklo_epi8(d8, zero);
+        __m128i d16_hi = _mm_unpackhi_epi8(d8, zero);
+
+        // sum(q*d)：成对 16-bit 乘加到 32-bit
+        __m128i sum32_lo = _mm_madd_epi16(q16_lo, d16_lo);
+        __m128i sum32_hi = _mm_madd_epi16(q16_hi, d16_hi);
+        accQD = _mm_add_epi32(accQD, sum32_lo);
+        accQD = _mm_add_epi32(accQD, sum32_hi);
+
+        // sum(d)：与 1 相乘再相邻成对相加
+        __m128i dsum32_lo = _mm_madd_epi16(d16_lo, ones);
+        __m128i dsum32_hi = _mm_madd_epi16(d16_hi, ones);
+        accD = _mm_add_epi32(accD, dsum32_lo);
+        accD = _mm_add_epi32(accD, dsum32_hi);
+    }
+
+    // 将向量累加器归约到 64-bit 标量
+    uint64_t sumQD = 0;
+    uint64_t sumD  = 0;
+    {
+        // 水平求和 accQD 4 个 32-bit
+        __m128i tmp1 = _mm_hadd_epi32(accQD, accQD); // [a0+a1, a2+a3, a0+a1, a2+a3]
+        __m128i tmp2 = _mm_hadd_epi32(tmp1, tmp1);   // [sum, sum, sum, sum]
+        sumQD = (uint32_t)_mm_cvtsi128_si32(tmp2);
+
+        __m128i d1 = _mm_hadd_epi32(accD, accD);
+        __m128i d2 = _mm_hadd_epi32(d1, d1);
+        sumD = (uint32_t)_mm_cvtsi128_si32(d2);
+    }
+
+    // 处理尾部
+    for (; i < D; ++i) {
+        sumQD += (uint64_t)qCodes[i] * (uint64_t)dCodes[i];
+        sumD  += (uint64_t)dCodes[i];
+    }
+
+    // 提取公因式一次解码
+    double qDelta = (double)queryCode->delta;
+    double qMin   = (double)queryCode->residualQueryMin;
+    double ipReal = qDelta * (double)sumQD + (qMin + 0.5 * qDelta) * (double)sumD;
+    *resultOut = (float)ipReal;
+}
+
+#elif (defined(__aarch64__) && defined(__ARM_NEON))
+
+#include <arm_neon.h>
 
 float estimateOneBitIp(
     const OneBitL2CaqEstimatorCtxT *ctx,
     const CaqOneBitQuantCodeT *dataCaqCode
 ) {
     size_t BlockNum = GetOneBitCodeSimdBlockNum(ctx->dim);
-    size_t bytesPerBlock = GetBytesPerSimdBlock();
-    size_t bytesPerPlane = bytesPerBlock * BlockNum; // 一整个 bitplane 的字节跨度
+    size_t bytesPerBlock = GetBytesPerSimdBlock(); // 32 bytes
     const QueryQuantCodeT *queryCode = ctx->queryQuantCode;
+
     uint64_t ipEstimate = 0;
-    uint64_t partialIp = 0;
     uint64_t ppcScalar = 0;
-    uint64_t temp[4];
 
-    // 以 block num 为单位处理，load 一次 database 向量的 SIMD_MAX_CAPACITY 维度后，
-    // 完成所有 bit lane 的计算，减少内存访问次数
-    for (int j = 0; j < BlockNum; ++j) {
+    uint64_t tmp64[2];   // 用于 popcount
+    uint8_t *qBlock;
+
+    for (size_t j = 0; j < BlockNum; ++j) {
         const uint8_t *dBlock = dataCaqCode->storedCodes + j * bytesPerBlock;
-        // 统计当前 block 的 1bit 编码中 1 的个数，用于后续计算距离常数项
-        for (int k = 0; k < 4; ++k) {
-            ppcScalar += __builtin_popcountll(((uint64_t*)dBlock)[k]);
-        }
-        for (int lane = 0; lane < QUERY_QUANTIZER_NUM_BITS; ++lane) {
-            partialIp = 0;
-        
-            const uint8_t *qBlock =
-                ctx->queryQuantCode->quantizedResidualQueryCodes + lane * bytesPerPlane +
-                j * bytesPerBlock;
-            
-            // 1. 将 query 向量第 j 个 block 的 256 维度的第 B bit 加载到 AVX 寄存器
-            // 2. 将 data 向量第 j 个 block 的 256 维度的 1bit 编码加载到 AVX 寄存器
-            // 处理 32 bytes (256 bits)
-            __m256i q_vec = _mm256_loadu_si256((__m256i *)qBlock);
-            __m256i d_vec = _mm256_loadu_si256((__m256i *)dBlock);
 
-            // 3. 使用 _mm256_and_si256 进行按位与运算，得到当前 lane 的内积结果
-            __m256i and_vec = _mm256_and_si256(q_vec, d_vec);
+        // 统计当前 block 中 data 1bit 的 popcount
+        const uint64_t *d64 = (const uint64_t *)dBlock;
+        ppcScalar += __builtin_popcountll(d64[0])
+                   + __builtin_popcountll(d64[1])
+                   + __builtin_popcountll(d64[2])
+                   + __builtin_popcountll(d64[3]);
 
-            // 4. 使用 __builtin_popcountll 统计内积结果中 1 的个数
-            _mm256_storeu_si256((__m256i *)temp, and_vec);
-            for (int k = 0; k < 4; ++k) {
-                partialIp += __builtin_popcountll(temp[k]); // 或者 _mm_popcnt_u64(temp[k])
-            }
+        for (int plane = 0; plane < QUERY_QUANTIZER_NUM_BITS; ++plane) {
+            uint64_t partialIp = 0;
 
-            // 5. 将结果累加到 ipEstimate 中，第 lane bit 的权重为 2^(b - lane - 1)
-            // 具体权重示例: lane0 → 128, lane1 → 64, lane2 → 32, lane3 → 16
-            // lane4 → 8, lane5 → 4, lane6 → 2, lane7 → 1
-            ipEstimate += partialIp * (1ULL << (QUERY_QUANTIZER_NUM_BITS - lane - 1));
+            GetSepQueryCodeValue(
+                ctx->queryQuantCtx,
+                ctx->queryQuantCode,
+                plane,
+                j,
+                &qBlock
+            );
+
+            // 低 16 字节
+            uint8x16_t q_lo = vld1q_u8(qBlock);
+            uint8x16_t d_lo = vld1q_u8(dBlock);
+            uint8x16_t a_lo = vandq_u8(q_lo, d_lo);
+            vst1q_u8((uint8_t *)tmp64, a_lo);
+
+            partialIp += __builtin_popcountll(tmp64[0])
+                       + __builtin_popcountll(tmp64[1]);
+
+            // 高 16 字节
+            uint8x16_t q_hi = vld1q_u8(qBlock + 16);
+            uint8x16_t d_hi = vld1q_u8(dBlock + 16);
+            uint8x16_t a_hi = vandq_u8(q_hi, d_hi);
+            vst1q_u8((uint8_t *)tmp64, a_hi);
+
+            partialIp += __builtin_popcountll(tmp64[0])
+                       + __builtin_popcountll(tmp64[1]);
+
+            ipEstimate += partialIp
+                * (1ULL << (QUERY_QUANTIZER_NUM_BITS - plane - 1));
         }
     }
 
-    return ctx->queryQuantCode->delta * (float)ipEstimate +
-           (ctx->queryQuantCode->residualQueryMin + 0.5f * ctx->queryQuantCode->delta) * (float)ppcScalar;
+    return queryCode->delta * (float)ipEstimate +
+           (queryCode->residualQueryMin + 0.5f * queryCode->delta)
+               * (float)ppcScalar;
 }
 
-/**
- * 计算单个数据库向量与 query 的 8 * N bit 内积距离
- */
-float InnerProductU8U8(
+void InnerProductU8U8(
     const RestBitL2EstimatorCtxT *ctx,
-    const CaqResBitQuantCodeT *dataCaqCode
+    const CaqResBitQuantCodeT *dataCaqCode,
+    float *resultOut
 ) {
+    size_t D = ctx->dim;
+    const QueryQuantCodeT *queryCode = ctx->queryQuantCode;
+    const uint8_t *qCodes = queryCode->quantizedQueryOriCodes;
+    const uint8_t *dCodes = dataCaqCode->storedCodes;
 
-}
+    uint32x4_t accQD = vdupq_n_u32(0);  // sum(q * d)
+    uint32x4_t accD  = vdupq_n_u32(0);  // sum(d)
 
-#elif (defined(__aarch64__) && defined(__ARM_NEON))
+    size_t i = 0;
+    for (; i + 16 <= D; i += 16) {
+        uint8x16_t q8 = vld1q_u8(qCodes + i);
+        uint8x16_t d8 = vld1q_u8(dCodes + i);
 
-float estimateOneBitIp(
-    const OneBitL2CaqEstimatorCtxT *ctx,
-    const CaqOneBitQuantCodeT *dataCaqCode
-) {
-    // TODO: 实现 ARM NEON 版本的 1 * N bit 内积计算
-    return 0;
+        // 解码为 16 位
+        uint16x8_t q16_lo = vmovl_u8(vget_low_u8(q8));
+        uint16x8_t q16_hi = vmovl_u8(vget_high_u8(q8));
+        uint16x8_t d16_lo = vmovl_u8(vget_low_u8(d8));
+        uint16x8_t d16_hi = vmovl_u8(vget_high_u8(d8));
+
+        // sum(q * d)
+        accQD = vaddq_u32(accQD, vmull_u16(vget_low_u16(q16_lo), vget_low_u16(d16_lo)));
+        accQD = vaddq_u32(accQD, vmull_u16(vget_high_u16(q16_lo), vget_high_u16(d16_lo)));
+        accQD = vaddq_u32(accQD, vmull_u16(vget_low_u16(q16_hi), vget_low_u16(d16_hi)));
+        accQD = vaddq_u32(accQD, vmull_u16(vget_high_u16(q16_hi), vget_high_u16(d16_hi)));
+
+        //  sum(d)
+        accD = vaddq_u32(accD, vpaddlq_u16(d16_lo));
+        accD = vaddq_u32(accD, vpaddlq_u16(d16_hi));
+    }
+
+    //  水平规约
+    uint64_t sumQD =
+        (uint64_t)vgetq_lane_u32(accQD, 0) +
+        (uint64_t)vgetq_lane_u32(accQD, 1) +
+        (uint64_t)vgetq_lane_u32(accQD, 2) +
+        (uint64_t)vgetq_lane_u32(accQD, 3);
+
+    uint64_t sumD =
+        (uint64_t)vgetq_lane_u32(accD, 0) +
+        (uint64_t)vgetq_lane_u32(accD, 1) +
+        (uint64_t)vgetq_lane_u32(accD, 2) +
+        (uint64_t)vgetq_lane_u32(accD, 3);
+
+    // 处理尾部
+    for (; i < D; ++i) {
+        sumQD += (uint64_t)qCodes[i] * (uint64_t)dCodes[i];
+        sumD  += (uint64_t)dCodes[i];
+    }
+
+    // 解码
+    double qDelta = (double)queryCode->delta;
+    double qMin   = (double)queryCode->residualQueryMin;
+    double ipReal = qDelta * (double)sumQD +
+                    (qMin + 0.5 * qDelta) * (double)sumD;
+
+    *resultOut = (float)ipReal;
 }
 
 #else
-
+    
 /**
  * 计算单个数据库向量与 query 的 1 * N bit 内积距离
  */
@@ -282,7 +460,7 @@ float estimateOneBitIp(
         uint8_t bit = (dataCodes[i / 8] >> (i % 8)) & 1u;
 
         uint32_t qval;
-        GetQueryCodeValue(ctx->queryQuantCtx, queryCode, i, &qval);
+        GetOriQueryCodeValue(ctx->queryQuantCtx, queryCode, i, &qval);
 
         ipEstimate += qval * bit;
         ppcScalar += bit;
@@ -292,36 +470,63 @@ float estimateOneBitIp(
 }
 
 /**
- * 计算单个数据库向量与 query 的 8 * N bit 内积距离
+ * 解码 N bit 的 query 量化编码到实数域，然后
+ * 计算单个数据库向量编码与 query 的内积距离
  */
-float InnerProductU8U8(
+void InnerProductU8U8(
     const RestBitL2EstimatorCtxT *ctx,
-    const CaqResBitQuantCodeT *dataCaqCode
+    const CaqResBitQuantCodeT *dataCaqCode,
+    float *resultOut
 ) {
     size_t D = ctx->dim;
-    const uint32_t resBits = (uint32_t)(ctx->numBits - 1);
 
-    // 获取数据库向量和 query 向量的量化编码
+    // 1. 获取数据库向量和 query 向量的量化编码（原始 U8 编码）
     const QueryQuantCodeT *queryCode = ctx->queryQuantCode;
-    uint32_t *dataCodes = (uint32_t *)malloc(sizeof(uint32_t) * D);
-    GetResBitQuantCode(
-        dataCaqCode,
-        D,
-        resBits,
-        dataCodes
-    );
+    const uint8_t *qCodes = queryCode->quantizedQueryOriCodes;
+    const uint8_t *dCodes = dataCaqCode->storedCodes;
 
-    // 计算内积
-    uint64_t ip = 0;
-    uint32_t qval;
+    // 2. 循环内仅做整数域计算：累计 sum(q_i * d_i) 与 sum(d_i)
+    //    将解码的公共因子在循环外一次性应用，减少浮点运算
+    uint64_t sumQD = 0; // 累计 q_i * d_i
+    uint64_t sumD  = 0; // 累计 d_i
     for (size_t i = 0; i < D; ++i) {
-        GetQueryCodeValue(ctx->queryQuantCtx, queryCode, i, &qval);
-        ip += (uint64_t)qval * (uint64_t)dataCodes[i];
+        sumQD += (uint64_t)qCodes[i] * (uint64_t)dCodes[i];
+        sumD  += (uint64_t)dCodes[i];
     }
-    free(dataCodes);
-    return (float)ip;
-}
 
+    // 3. 提取公因式解码：
+    //    qReal_i = (q_i + 0.5) * qDelta + qMin
+    //    sum(qReal_i * d_i) = qDelta * sum(q_i * d_i) + (qMin + 0.5*qDelta) * sum(d_i)
+    double qDelta = (double)queryCode->delta;
+    double qMin   = (double)queryCode->residualQueryMin;
+    double ipReal = qDelta * (double)sumQD + (qMin + 0.5 * qDelta) * (double)sumD;
+
+    *resultOut = (float)ipReal;
+}
+// void InnerProductU8U8(
+//     const RestBitL2EstimatorCtxT *ctx,
+//     const CaqResBitQuantCodeT *dataCaqCode,
+//     float *resultOut
+// ) {
+//     size_t D = ctx->dim;
+//     const uint32_t resBits = (uint32_t)(ctx->numBits - 1);
+
+//     // 1.获取数据库向量和 query 向量的量化编码
+//     const QueryQuantCodeT *queryCode = ctx->queryQuantCode;
+//     const uint8_t *dataCodes = dataCaqCode->storedCodes;
+
+//     float ip = 0.0;
+//     // 2.解码 query 到实数域并计算内积，该写法性能较差，但为了便于读者理解还是保留
+//     // uint32_t qval;
+//     // float qValReal;
+//     // for (size_t i = 0; i < D; ++i) {
+//     //     GetOriQueryCodeValue(ctx->queryQuantCtx, queryCode, i, &qval);
+//     //     // 
+//     //     qValReal = ((float)qval + 0.5) * (float)ctx->queryQuantCode->delta + (float)ctx->queryQuantCode->residualQueryMin;
+//     //     ip += qValReal * (float)dataCodes[i];
+//     // }
+//     *resultOut = (float)ip;
+// }
 #endif
 
 void OneBitCaqEstimateDistance(
@@ -357,40 +562,48 @@ void ResBitCaqEstimateDistance(
     const RestBitL2EstimatorCtxT *ctx,
     const CaqResBitQuantCodeT *dataCaqCode,
     float *distanceOut
-) {
+) { 
+    // 1. 从缓存中获取 1bit 内积结果 和 原始向量 L2 范数
     float oneBitRawIp, oL2Norm;
-    FindInCache(ctx->scannerCtx, 0, &oneBitRawIp, &oL2Norm);
+    FindInCache(ctx->scannerCtx, 0, &oneBitRawIp, &oL2Norm);    // TODO: 将 0 替换为 nodeId
+    const float oL2Sqr = oL2Norm * oL2Norm;
 
-    // 低位贡献：将低位整数编码与 query 的实数解码进行内积，并用 CAQ 低位步长映射到实数域
+    // 2. 计算低位贡献：将低位整数编码与 query 的实数解码进行内积，
+    // 并用 CAQ 低位步长映射到实数域
+    // [该计算方法是为了便于读者理解的写法，计算效率较低，实际应用中可优化为整数域内积后再映射到实数域]
+    // float qDelta = ctx->queryQuantCode->delta;
+    // float qMin = ctx->queryQuantCode->residualQueryMin;
+    // const uint32_t resBits = (uint32_t)(ctx->numBits - 1);
+    // const uint8_t *resCodes = dataCaqCode->storedCodes;
+    // float lowIpReal = 0.0;
+    // uint32_t qv;
+    // for (size_t i = 0; i < ctx->dim; ++i) {
+    //     GetOriQueryCodeValue(ctx->queryQuantCtx, ctx->queryQuantCode, i, &qv);
+    //     float qReal = ((float)qv + 0.5f) * qDelta + qMin;
+    //     uint32_t dlow = (uint32_t)(resCodes[i]);
+    //     float dRealLow = ((float)dlow + 0.5f) * ctx->caqDelta + (-1.0f);
+    //     lowIpReal += (float)qReal * (float)dRealLow;
+    // }
+    // // 3. 总内积（实数域）：oneBitRawIp 已经是实数域内积，直接相加
+    // float ipOQScaled = (float)((float)oneBitRawIp + lowIpReal);
+    // float ipOQ = dataCaqCode->rescaleFactor * ipOQScaled;
+
+    // 2. 提取低位贡献：使用专门的函数计算低位整数编码与 query 的实数解码进行内积
+    // 该写法便于后续对低位内积计算进行 SIMD 优化
+    float realQueryIpF;
+    InnerProductU8U8(ctx, dataCaqCode, &realQueryIpF);
+    float caqDelta = ctx->caqDelta;
     float qDelta = ctx->queryQuantCode->delta;
     float qMin = ctx->queryQuantCode->residualQueryMin;
-    const uint32_t resBits = (uint32_t)(ctx->numBits - 1);
-    const uint8_t *resCodes = dataCaqCode->storedCodes;
-    double lowIpReal = 0.0;
-    for (size_t i = 0; i < ctx->dim; ++i) {
-        uint32_t qv;
-        GetQueryCodeValue(ctx->queryQuantCtx, ctx->queryQuantCode, i, &qv);
-        float qReal = ((float)qv + 0.5f) * qDelta + qMin;
-
-        uint32_t dlow = 0;
-        for (uint32_t b = 0; b < resBits; ++b) {
-            size_t bitPos = i * resBits + b;
-            size_t byteIdx = bitPos / 8;
-            size_t bitIdx = bitPos % 8;
-            uint8_t bitVal = (resCodes[byteIdx] >> bitIdx) & 1u;
-            dlow |= (bitVal << b);
-        }
-        float dRealLow = ((float)dlow + 0.5f) * ctx->caqDelta + (-1.0f);
-        lowIpReal += (double)qReal * (double)dRealLow;
-    }
-
-    // 总内积（实数域）：oneBitRawIp 已经是实数域内积，直接相加
-    float ipOQScaled = (float)((double)oneBitRawIp + lowIpReal);
+    float sumCodes = ctx->queryQuantCode->quantizedQuerySum;
+    float dim = (float)ctx->dim;
+    float sumQReal = qDelta * sumCodes + dim * qMin + 0.5 * qDelta * dim;
+    float ipOQScaled = oneBitRawIp + realQueryIpF * caqDelta + (-1.0 + caqDelta / 2.0) * sumQReal;
     float ipOQ = dataCaqCode->rescaleFactor * ipOQScaled;
 
-    const float oL2Sqr = oL2Norm * oL2Norm;
     float L2Distance = oL2Sqr + ctx->queryQuantCode->residualQueryL2Sqr - 2.0f * ipOQ;
     if (L2Distance < 0) L2Distance = 0.0f;
+
     *distanceOut = L2Distance;
 }
 

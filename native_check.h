@@ -2,6 +2,7 @@
 #define NATIVE_CHECK_H
 
 #include <immintrin.h>
+#include <stdio.h>
 
 #if (defined(__x86_64__) && defined(__AVX__))
 #define SIMD_MAX_CAPACITY 256  // __AVX__ 的 SIMD 最大并行计算容量为 256 位
@@ -15,7 +16,6 @@
 // 若不支持 SIMD 指令集，则不定义 SIMD_MAX_CAPACITY，使用普通 C 语言实现
 
 #endif
-
 
 #ifdef SIMD_MAX_CAPACITY
 size_t GetOneBitCodeSimdBlockNum(size_t dim) {

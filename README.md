@@ -1,4 +1,4 @@
-# 
+# 项目说明
 
 此项目是 SAQ 量化算法中 CAQ 量化算法的 C 语言风格版本。算法原仓库为：https://github.com/howarlii/SAQ
 
@@ -7,21 +7,49 @@
 ### 编译：
 
 ```bash
-cc -std=c11 -O2 encoder_example.c -lm -o encoder_example
-cc -std=c11 -O2 rotator_example.c -lm -o rotator_example
-cc -std=c11 -O2 quantizer_example.c -lm -o quantizer_example
-cc -std=c11 -O2 -mavx2 estimator.c -lm -o estimator  # AVX 优化路径
+set -e
+rm -rf build && mkdir -p build && cd build
+cmake -DSIMD=AVX ..
+cmake -DSIMD=NONE .. # 或弃用 SIMD 优化
+cmake --build . -j
 ```
+
+本项目预计支持 AVX 和 NEON 两个 SIMD 版本，以实现低配机器可运行。
+
+由于 _mm256_shuffle_ps 仅支持静态查表，因此无法支持 FastScan ，只能选择单向量计算。
+
 
 ### 运行
 
 ```bash
-./encoder_example
-./rotator_example
-./estimator 20000 1 512 1234 10 # data数量 query数量 维度 随机种子 重复次数
+./build/encoder_example
+./build/rotator_example
+./build/estimator 2000 1 256 1234 10 # data数量 query数量 维度 随机种子 重复次数，B固定为9
 ```
 
-若编译环境未默认开启 AVX，可使用 `-mavx`（或 `-march=native`）启用，否则会退化到纯 C 路径或触发编译错误。
+预计结果：
+
+```bash
+(base) dn@ubun:~/projects/SAQ_C$ ./build/estimator 2000 1 256 1234 10
+Data count: 2000
+Query count: 1
+Loop count: 10
+Dim: 256, numBits: 9
+Seed: 1234
+Init time (sum): 0.050 ms
+Estimate time (sum): 8.384 ms
+Rest estimate time (sum): 0.442 ms
+Loop unstable pairs: 0
+Loop max abs diff: 0.000000
+Rest mean abs error: 0.061395
+Rest mean rel error: 0.000351 # 1+8 bit 估算的平均相对误差
+Rest max abs error: 0.317078
+Rest max rel error: 0.001731
+Mean abs error: 16.058422 # 1bit估算的平均绝对误差
+Mean rel error: 0.091338  # 1bit估算的平均相对误差
+Max abs error: 42.528992  # 1bit估算的最大绝对误差
+Max rel error: 0.254242   # 1bit估算的最大相对误差
+```
 
 # 移植差异说明
 
@@ -94,3 +122,20 @@ SAQ 1-bit (gist)    | Error Acc: 5.88780e-03 (diff=0.04%)    Fast: 1.5130e-01 (d
 
 经过测试，本 query 量化器与原始 SAQ 仓库中量化结果完全一致。
 
+## 4. 估算器差异
+
+对于精确距离估算器（即 1 + 8 bit 估算器），不同于原始仓库中使用无量化版本query进行距离重算：
+
+```c++
+float ip_oa1_q = utils::mask_ip_x0_q(curr_query_.data(), short_code, num_dim_padded_);
+```
+
+我们使用量化后的 query 与 short_code 的内积缓存作为 1bit 内积数据源，因此存在少量差异。
+
+此外对于原始仓库中使用 float query 与 database vector 量化编码直接内积：
+
+```c++
+IP_FUNC(curr_query_.data(), long_code, num_dim_padded_);
+```
+
+我们使用量化后的 query 与 database vector 量化编码做内积，因此可能存在少量差异。

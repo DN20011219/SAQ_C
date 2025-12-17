@@ -101,7 +101,7 @@ void randomOrthogonalMatrix(float *P, int D)
  * 但该方法生成的正交矩阵并不服从 Haar 分布，均匀性较差，且旋转幅度非常小
  * 可根据实际需求选择使用
  */
-inline float frandUniform() {
+float frandUniform() {
     // [-1,1] uniform random, 模拟 Eigen::Random()
     return (rand() / (float)RAND_MAX) * 2.0f - 1.0f;
 }

@@ -7,6 +7,7 @@
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
+#include <assert.h>
 
 #define ADJUST_ROUND_LIMIT 6
 #define ADJUST_EPSILON 1e-8f
@@ -27,12 +28,13 @@ size_t getCaqOneBitQuantCodeSize(size_t dim) {
 #ifdef SIMD_MAX_CAPACITY
     return GetBytesPerSimdBlock() * GetOneBitCodeSimdBlockNum(dim); // 按 SIMD 寄存器对齐分配存储空间
 #else
-    return (sizeof(uint8_t) * dim + 7) / 8;    // 按字节对齐分配存储空间
+    return (sizeof(uint8_t) * dim + 7) / 8;    // 若无需 SIMD 支持，按字节对齐分配存储空间
 #endif
 }
 
 size_t getCaqResBitQuantCodeSize(size_t dim, uint32_t resBits) {
-    return (sizeof(uint8_t) * dim * resBits + 7) / 8; // 按字节对齐分配存储空间
+    assert(resBits > 0 && resBits <= 8 && "resBits must be in (0, 8]");
+    return sizeof(uint8_t) * dim; // 默认一个维度分配一个字节的存储空间
 }
 
 void CreateCaqOneBitQuantCode(CaqOneBitQuantCodeT **res, size_t dim) {
@@ -355,7 +357,7 @@ void SeparateCode(
     resBit->rescaleFactor = caqCode->rescaleFactor;
     uint32_t numBits = (uint32_t)cfg->numBits;
     uint32_t resBits = numBits - 1;
-    
+
     for (size_t i = 0; i < cfg->dimPadded; ++i) {
         uint32_t code = caqCode->codes[i];
         uint8_t highBit = (uint8_t)((code >> resBits) & 1);       // 取最高位
@@ -367,13 +369,18 @@ void SeparateCode(
         oneBit->storedCodes[byteIdx1] |= (highBit << bitIdx1);
 
         // 存储低位 N-1 bit
-        for (uint32_t b = 0; b < resBits; ++b) {
-            uint8_t bitVal = (lowBits >> b) & 1;
-            size_t bitPos = i * resBits + b;
-            size_t byteIdx = bitPos / 8;
-            size_t bitIdx = bitPos % 8;
-            resBit->storedCodes[byteIdx] |= (bitVal << bitIdx);
-        }
+        resBit->storedCodes[i] = lowBits;
+    }
+}
+
+void GetResBitQuantCode(
+    const CaqResBitQuantCodeT *resBitCode,
+    size_t dim,
+    uint32_t resBits,
+    uint32_t *outCodes
+) {
+    for (size_t i = 0; i < dim; ++i) {
+        outCodes[i] = (uint32_t)(resBitCode->storedCodes[i]);
     }
 }
 
