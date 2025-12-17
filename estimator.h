@@ -185,8 +185,13 @@ void DestroyRestBitL2EstimatorCtx(RestBitL2EstimatorCtxT **ctx) {
  * 3. 若均不支持，则使用普通 C 语言实现，该实现无需 QueryQuantizerLayoutT::LAYOUT_SEPARATED 布局支持
  */
 #if (defined(__x86_64__) && defined(__AVX__))
-#include <immintrin.h>
 
+
+#define USE_SEPARATED_QUERY_LAYOUT
+#define PRE_COMPUTED_QUERY_BLOCK_PTRS
+
+#ifdef USE_SEPARATED_QUERY_LAYOUT
+#ifndef PRE_COMPUTED_QUERY_BLOCK_PTRS
 float estimateOneBitIp(
     const OneBitL2CaqEstimatorCtxT *ctx,
     const CaqOneBitQuantCodeT *dataCaqCode
@@ -235,6 +240,154 @@ float estimateOneBitIp(
     return queryCode->delta * (float)ipEstimate +
            (queryCode->residualQueryMin + 0.5f * queryCode->delta) * (float)ppcScalar;
 }
+#else
+/**
+ * 1bit IP 估计（SSE2 优化版，分离式 query layout）
+ */
+float estimateOneBitIp(
+    const OneBitL2CaqEstimatorCtxT *ctx,
+    const CaqOneBitQuantCodeT *dataCaqCode
+) {
+    const size_t BlockNum       = GetOneBitCodeSimdBlockNum(ctx->dim);
+    const size_t bytesPerBlock  = GetBytesPerSimdBlock(); // 32 bytes
+    const QueryQuantCodeT *queryCode = ctx->queryQuantCode;
+
+    uint64_t ipEstimate = 0;
+    uint64_t ppcScalar  = 0;
+
+    // popcount buffer
+    uint64_t tmp64[2];
+
+    // plane 权重（QUERY_QUANTIZER_NUM_BITS 是编译期常量，理论上可编译器计算）
+    uint64_t planeWeight[QUERY_QUANTIZER_NUM_BITS];
+    for (int p = 0; p < QUERY_QUANTIZER_NUM_BITS; ++p) {
+        planeWeight[p] = 1ULL << (QUERY_QUANTIZER_NUM_BITS - p - 1);
+    }
+
+    for (size_t j = 0; j < BlockNum; ++j) {
+        const uint8_t *dBlock =
+            dataCaqCode->storedCodes + j * bytesPerBlock;
+
+        /* --------------------------------------------------
+         * 1. 统计 data block 的 1bit popcount（ppcScalar）
+         * -------------------------------------------------- */
+        const uint64_t *d64 = (const uint64_t *)dBlock;
+        ppcScalar += __builtin_popcountll(d64[0]);
+        ppcScalar += __builtin_popcountll(d64[1]);
+        ppcScalar += __builtin_popcountll(d64[2]);
+        ppcScalar += __builtin_popcountll(d64[3]);
+
+        /* --------------------------------------------------
+         * 2. data block 只 load 一次
+         * -------------------------------------------------- */
+        __m128i d_lo = _mm_loadu_si128((const __m128i *)(dBlock));
+        __m128i d_hi = _mm_loadu_si128((const __m128i *)(dBlock + 16));
+
+        /* --------------------------------------------------
+         * 3. 预先计算所有 plane 的 query block 指针
+         * -------------------------------------------------- */
+        uint8_t *qPlanePtr[QUERY_QUANTIZER_NUM_BITS];
+        for (int plane = 0; plane < QUERY_QUANTIZER_NUM_BITS; ++plane) {
+            GetSepQueryCodeValue(
+                ctx->queryQuantCtx,
+                queryCode,
+                (size_t)plane,
+                j,
+                &qPlanePtr[plane]
+            );
+        }
+
+        /* --------------------------------------------------
+         * 4. plane 内积累 IP
+         * -------------------------------------------------- */
+        uint64_t blockIp = 0;
+
+        for (int plane = 0; plane < QUERY_QUANTIZER_NUM_BITS; ++plane) {
+            const uint8_t *qBlock = qPlanePtr[plane];
+
+            // 低 16B
+            __m128i q_lo = _mm_loadu_si128((const __m128i *)(qBlock));
+            __m128i a_lo = _mm_and_si128(q_lo, d_lo);
+            _mm_storeu_si128((__m128i *)tmp64, a_lo);
+            uint64_t pc =
+                (uint64_t)__builtin_popcountll(tmp64[0]) +
+                (uint64_t)__builtin_popcountll(tmp64[1]);
+
+            // 高 16B
+            __m128i q_hi = _mm_loadu_si128((const __m128i *)(qBlock + 16));
+            __m128i a_hi = _mm_and_si128(q_hi, d_hi);
+            _mm_storeu_si128((__m128i *)tmp64, a_hi);
+            pc +=
+                (uint64_t)__builtin_popcountll(tmp64[0]) +
+                (uint64_t)__builtin_popcountll(tmp64[1]);
+
+            blockIp += pc * planeWeight[plane];
+        }
+
+        ipEstimate += blockIp;
+    }
+
+    /* --------------------------------------------------
+     * 5. 最终标量修正
+     * -------------------------------------------------- */
+    return queryCode->delta * (float)ipEstimate +
+           (queryCode->residualQueryMin + 0.5f * queryCode->delta) *
+               (float)ppcScalar;
+}
+#endif
+#else
+/**
+ * AVX2 优化版本，要求 D 是 128 的倍数
+ * 无需分离式布局支持，减少pack代价
+ */
+float estimateOneBitIp(
+    const OneBitL2CaqEstimatorCtxT *ctx,
+    const CaqOneBitQuantCodeT *dataCaqCode
+) {
+    size_t D = ctx->dim;
+    const uint8_t *dataCodes = dataCaqCode->storedCodes;
+    const uint8_t *queryCodes = ctx->queryQuantCode->quantizedQueryOriCodes;
+    const float queryDelta = ctx->queryQuantCode->delta;
+    const float queryMin = ctx->queryQuantCode->residualQueryMin + 0.5f * queryDelta;
+
+    __m256i ipVec = _mm256_setzero_si256();
+    __m256i ppcVec = _mm256_setzero_si256();
+
+    for (size_t i = 0; i < D; i += 32) {
+        uint32_t bits32 = *(uint32_t *)(dataCodes + i / 8);
+
+        for (int k = 0; k < 4; ++k) {  // 每 8 bit 展开一次
+            uint8_t bytek = (bits32 >> (k * 8)) & 0xFF;
+
+            // 使用 _mm256_setr_epi32 展开 8-bit -> 8 个 32-bit
+            __m256i bv = _mm256_setr_epi32(
+                (bytek >> 0) & 1, (bytek >> 1) & 1, (bytek >> 2) & 1, (bytek >> 3) & 1,
+                (bytek >> 4) & 1, (bytek >> 5) & 1, (bytek >> 6) & 1, (bytek >> 7) & 1
+            );
+
+            // load 8 query bytes，扩展到 32-bit
+            __m128i q8 = _mm_loadl_epi64((__m128i*)(queryCodes + i + k * 8));
+            __m256i qv = _mm256_cvtepu8_epi32(q8);
+
+            ipVec = _mm256_add_epi32(ipVec, _mm256_mullo_epi32(qv, bv));
+            ppcVec = _mm256_add_epi32(ppcVec, bv);
+        }
+    }
+
+    // horizontal add
+    uint32_t ipArr[8], ppcArr[8];
+    _mm256_storeu_si256((__m256i*)ipArr, ipVec);
+    _mm256_storeu_si256((__m256i*)ppcArr, ppcVec);
+
+    uint64_t ipSum = 0, ppcSum = 0;
+    for (int k = 0; k < 8; ++k) {
+        ipSum += ipArr[k];
+        ppcSum += ppcArr[k];
+    }
+
+    return queryDelta * (float)ipSum + queryMin * (float)ppcSum;
+}
+#endif
 
 /**
  * AVX 加速版本：计算低位编码与解码后的 query 的内积
@@ -309,8 +462,6 @@ void InnerProductU8U8(
 }
 
 #elif (defined(__aarch64__) && defined(__ARM_NEON))
-
-#include <arm_neon.h>
 
 float estimateOneBitIp(
     const OneBitL2CaqEstimatorCtxT *ctx,
