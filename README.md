@@ -18,13 +18,19 @@ cmake --build . -j
 
 由于 _mm256_shuffle_ps 仅支持静态查表，因此无法支持 FastScan ，只能选择单向量计算。
 
+此外，针对是否使用分离存储，本项目提供了两种量化和估算路径：
+
+* estimator.h 文件使用分离存储版本进行距离估算。此外，为了加速计算，该版本必须对 query 进行量化操作。
+
+* estimator_easy.h 文件使用非分离存储版本进行距离估算。为了尽可能减少精度影响，该版本不支持对 query 进行量化，以体现真实的量化精度。
 
 ### 运行
 
 ```bash
 ./build/encoder_example
 ./build/rotator_example
-./build/estimator 2000 1 256 1234 10 # data数量 query数量 维度 随机种子 重复次数，B固定为9
+./build/estimator_example 10000 1 256 1234 1                  # data数量 query数量 维度 随机种子 重复次数，B固定为9
+./build/estimator_easy_example 10000 1 256 1234 1 8   # data数量 query数量 维度 随机种子 重复次数 B
 ```
 
 预计结果：

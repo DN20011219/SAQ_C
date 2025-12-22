@@ -28,13 +28,15 @@ typedef struct {
 
     float *residualVector;          // 用于存储残差向量的缓冲区指针，避免每次量化都分配内存
     float *rotatedVector;           // 用于存储旋转后向量的缓冲区指针，避免每次量化都分配内存
-} L2CaqQuantizerCtxT;
+} CaqQuantizerCtxT;
 
-void CaqQuantizerInit(L2CaqQuantizerCtxT **ctx,
+void CaqQuantizerInit(CaqQuantizerCtxT **ctx,
                          size_t dim,
                          float *centroid,
-                         size_t numBits) {
-    *ctx = (L2CaqQuantizerCtxT *)malloc(sizeof(L2CaqQuantizerCtxT));
+                         size_t numBits,
+                         bool useSeparateStorage
+) {
+    *ctx = (CaqQuantizerCtxT *)malloc(sizeof(CaqQuantizerCtxT));
     if (*ctx == NULL) {
         return;
     }
@@ -43,10 +45,10 @@ void CaqQuantizerInit(L2CaqQuantizerCtxT **ctx,
     (*ctx)->residualVector = (float *)malloc(sizeof(float) * dim);  // 分配残差向量缓冲区
     (*ctx)->rotatedVector = (float *)malloc(sizeof(float) * dim);   // 分配旋转后向量缓冲区
     createRotatorMatrix(&(*ctx)->rotatorMatrix, dim);
-    CreateCaqQuantConfig(dim, numBits, &(*ctx)->encodeConfig);
+    CreateCaqEncodeConfig(dim, numBits, useSeparateStorage, &(*ctx)->encodeConfig); // Encoder 和 量化器同生命周期，因此由量化器创建和销毁
 }
 
-void CaqQuantizerDestroy(L2CaqQuantizerCtxT **ctx) {
+void CaqQuantizerDestroy(CaqQuantizerCtxT **ctx) {
     if (ctx == NULL || *ctx == NULL) {
         return;
     }
@@ -64,7 +66,7 @@ void CaqQuantizerDestroy(L2CaqQuantizerCtxT **ctx) {
     *ctx = NULL;
 }
 
-void CaqQuantizeVector(const L2CaqQuantizerCtxT *ctx,
+void CaqQuantizeVector(const CaqQuantizerCtxT *ctx,
                        const float *inputVector,
                        CaqQuantCodeT **outputCode) {
     size_t D = ctx->dim;
@@ -96,6 +98,16 @@ void CaqSeparateStoredCodes(
         caqCode,
         oneBitCode,
         resBitCode
+    );
+}
+
+void CaqMergeStoredCodes(
+    const CaqEncodeConfig *cfg,
+    CaqQuantCodeT *caqCode
+) {
+    StoreCode(
+        cfg,
+        caqCode
     );
 }
 

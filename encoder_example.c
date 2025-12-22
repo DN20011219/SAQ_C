@@ -4,7 +4,7 @@
 
 void encodeExample(const float *vector, size_t dim, size_t numBits) {
     CaqEncodeConfig *ccfg;
-    CreateCaqQuantConfig(dim, numBits, &ccfg);
+    CreateCaqEncodeConfig(dim, numBits, true, &ccfg);
     CaqQuantCodeT *caqCode = NULL;
     CreateCaqQuantCode(&caqCode, dim);
     if (caqCode != NULL) {

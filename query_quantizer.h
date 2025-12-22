@@ -53,6 +53,7 @@ typedef struct {
     float *rotatorMatrix;           // 随机正交矩阵指针，用于旋转向量
     float *residualVector;          // 用于存储残差向量的缓冲区指针，避免每次量化都分配内存
     float *rotatedVector;           // 用于存储旋转后向量的缓冲区指针，避免每次量化都分配内存
+    // float rotatedL2Norm;            // 旋转后向量的 L2 范数
     // QueryQuantizerLayoutT layout;   // 量化编码布局
 } QueryQuantizerCtxT;
 
@@ -275,6 +276,7 @@ void FreeBitplanes(uint8_t **bitplanes, size_t b) {
 
 /**
  * TODO: QuantizeQueryVector 是查询时开销，因此 SIMD 加速应该是必须的
+ * QuantizeQueryVector 需要与 estimator 配合使用
  */
 void QuantizeQueryVector(const QueryQuantizerCtxT *ctx,
                        const float *inputVector,
@@ -394,6 +396,40 @@ void QuantizeQueryVector(const QueryQuantizerCtxT *ctx,
                layout_ns * 100.0 / total_ns, (double)layout_ns / 1e6);
     }
 #endif // QUERY_QUANTIZER_PROFILE
+}
+
+void EasyEstimatorCtxPrepare(
+    const QueryQuantizerCtxT *ctx,
+    const float *inputVector,
+    QueryQuantCodeT **outputCode
+) {
+    size_t D = ctx->dim;
+    float *centroid = ctx->centroid;
+    float *residualVector = ctx->residualVector;
+    float *rotatedVector = ctx->rotatedVector;
+
+    // 计算残差向量
+    for (size_t i = 0; i < D; ++i) {
+        residualVector[i] = inputVector[i] - centroid[i];
+    }
+
+    // 旋转向量
+    rotateVector(ctx->rotatorMatrix, residualVector, rotatedVector, D);
+
+    // 计算 L2 范数平方
+    float l2Sqr = 0.0f;
+    float sum = 0.0f;
+    for (size_t i = 0; i < D; ++i) {
+        float val = rotatedVector[i];
+        l2Sqr += val * val;
+        sum += val;
+    }
+
+    // 缓存
+    CreateQueryQuantCode(outputCode, D);
+    (*outputCode)->residualQueryL2Sqr = l2Sqr;
+    (*outputCode)->residualQueryL2Norm = sqrtf(l2Sqr);
+     (*outputCode)->residualQuerySum = sum;
 }
 
 /**

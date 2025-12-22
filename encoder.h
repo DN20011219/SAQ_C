@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <assert.h>
+#include <stdbool.h>
 
 #define ADJUST_ROUND_LIMIT 6
 #define ADJUST_EPSILON 1e-8f
@@ -96,6 +97,7 @@ typedef struct {
     uint8_t* storedCodes;           // 最终存储的量化编码，按实际 numBits 位数存储
     float *floatCodes;              // 用于存储浮点型编码，便于后续调整
     double quantizedVectorL2Sqr;    // |o_a|^2, 量化后向量的平方 L2 范数
+    float quantizedVectorSum;       // 量化后向量各维度编码之和
     double oriVecQuantVecIp;        // <o, o_a>, 原始向量与量化后向量的内积
     float oriVecL2Sqr;              // |o|^2, 原始向量的平方 L2 范数
     float oriVecL2Norm;             // |o|, 原始向量的 L2 范数
@@ -111,6 +113,7 @@ void CreateCaqQuantCode(CaqQuantCodeT **res, size_t dim) {
     (*res)->min = 0.0f;
     (*res)->delta = 0.0;
     (*res)->codes = (uint32_t*)malloc(sizeof(uint32_t) * dim);
+    (*res)->storedCodes = (uint8_t*)malloc(sizeof(uint8_t) * dim);
     (*res)->floatCodes = (float*)malloc(sizeof(float) * dim);
     (*res)->quantizedVectorL2Sqr = 0.0;
     (*res)->oriVecQuantVecIp = 0.0;
@@ -126,6 +129,10 @@ void DestroyCaqQuantCode(CaqQuantCodeT **caqCode) {
     if ((*caqCode)->codes) {
         free((*caqCode)->codes);
         (*caqCode)->codes = NULL;
+    }
+    if ((*caqCode)->storedCodes) {
+        free((*caqCode)->storedCodes);
+        (*caqCode)->storedCodes = NULL;
     }
     if ((*caqCode)->floatCodes) {
         free((*caqCode)->floatCodes);
@@ -156,11 +163,13 @@ typedef struct {
     float caqAdjustEpsilon;      // 调整阈值
     uint32_t codeMax;            // 量化编码的最大值
     uint32_t codeMin;            // 量化编码的最小值
+    bool useSeparateStorage;     // 是否使用分离式存储布局，若为 true ，则最高位 1bit 与剩余 N-1 bit 分开存储，且需要进行放缩
 } CaqEncodeConfig;
 
-void CreateCaqQuantConfig(
+void CreateCaqEncodeConfig(
     size_t dim, 
     size_t numBits,
+    bool useSeparateStorage,
     CaqEncodeConfig **cfg_out
 ) {
     *cfg_out = (CaqEncodeConfig *)malloc(sizeof(CaqEncodeConfig));
@@ -170,6 +179,7 @@ void CreateCaqQuantConfig(
     (*cfg_out)->caqAdjustEpsilon = ADJUST_EPSILON;
     (*cfg_out)->codeMax = (uint32_t)((1u << numBits) - 1u);
     (*cfg_out)->codeMin = 0u;
+    (*cfg_out)->useSeparateStorage = useSeparateStorage;
 }
 
 void DestroyCaqQuantConfig(CaqEncodeConfig **cfg) {
@@ -331,15 +341,27 @@ void Encode(const float *originalVector, CaqQuantCodeT *caqCode, const CaqEncode
         CodeAdjustment(originalVector, caqCode, cfg);
     }
 
-    // 将值域放缩到 [-1, 1] 范围内，便于后续计算
-    RescaleMaxToOne(caqCode);
+    if (cfg->useSeparateStorage) {
+        // 如果使用分离式存储布局，将值域放缩到 [-1, 1] 范围内，便于后续计算，并设置 rescaleFactor
+        RescaleMaxToOne(caqCode);
+        if (caqCode->oriVecQuantVecIp) {
+            caqCode->rescaleFactor = caqCode->oriVecL2Sqr / caqCode->oriVecQuantVecIp; // rescaleFactor = ||o||^2 / <o, o_a> * v_mx
+        } else {
+            caqCode->rescaleFactor = 0;
+        }
+    } else {
+        // 更新 caqCode->oriVecQuantVecIp 为新编码解码的内积
+        double new_oriQuantIp = 0.0;
+        for (size_t i = 0; i < cfg->dimPadded; ++i) {
+            float originalValue = originalVector[i];
+            uint32_t codes = caqCode->codes[i];
+            double q = ((double)codes + 0.5) * caqCode->delta + (double)caqCode->min;
+            new_oriQuantIp += q * (double)originalValue;
+        }
+        caqCode->oriVecQuantVecIp = new_oriQuantIp;
+    }
 
     caqCode->oriVecL2Norm = (float)sqrt((double)caqCode->oriVecL2Sqr);
-    if (caqCode->oriVecQuantVecIp) {
-        caqCode->rescaleFactor = caqCode->oriVecL2Sqr / caqCode->oriVecQuantVecIp; // rescaleFactor = ||o||^2 / <o, o_a> * v_mx
-    } else {
-        caqCode->rescaleFactor = 0;
-    }
 }
 
 // 将完整的每个维度 N bit 量化编码拆分为每个维度 1 bit 和 N-1 bit 两部分进行存储
@@ -370,6 +392,17 @@ void SeparateCode(
 
         // 存储低位 N-1 bit
         resBit->storedCodes[i] = lowBits;
+    }
+}
+
+void StoreCode(
+    const CaqEncodeConfig *cfg,
+    CaqQuantCodeT *caqCode
+) {
+    assert(cfg->numBits <= 8 && "Only support numBits <= 8 in StoreCode");
+    for (size_t i = 0; i < cfg->dimPadded; ++i) {
+        uint32_t code = caqCode->codes[i];
+        caqCode->storedCodes[i] = (uint8_t)(code & 0xFF);
     }
 }
 

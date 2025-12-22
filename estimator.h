@@ -70,7 +70,8 @@ void FindInCache(
  *  3. 对 q' 进行量化编码，以使用整型计算代替浮点运算，节约算力资源。
  *     对于 query ，我们将其每个维度固定量化为 QUERY_QUANTIZER_NUM_BITS 位
  * 2. 计算 1bit 编码的距离
- * 
+ * 3. 精排阶段（可选）：
+ *  1. 使用剩余位数的量化编码对距离进行精排
  * 
  * 若距离为 IP ，则需要：
  * 1. 上下文准备（质心相同的向量属于相同上下文，因为质心相同，量化时使用的正交矩阵也相同）
@@ -393,7 +394,7 @@ float estimateOneBitIp(
  * AVX 加速版本：计算低位编码与解码后的 query 的内积
  * ip = sum_i [ ((q_i + 0.5) * qDelta + qMin) * dlow_i ]
  */
-void InnerProductU8U8(
+void InnerProductRestBit(
     const RestBitL2EstimatorCtxT *ctx,
     const CaqResBitQuantCodeT *dataCaqCode,
     float *resultOut
@@ -526,7 +527,7 @@ float estimateOneBitIp(
                * (float)ppcScalar;
 }
 
-void InnerProductU8U8(
+void InnerProductRestBit(
     const RestBitL2EstimatorCtxT *ctx,
     const CaqResBitQuantCodeT *dataCaqCode,
     float *resultOut
@@ -624,7 +625,7 @@ float estimateOneBitIp(
  * 解码 N bit 的 query 量化编码到实数域，然后
  * 计算单个数据库向量编码与 query 的内积距离
  */
-void InnerProductU8U8(
+void InnerProductRestBit(
     const RestBitL2EstimatorCtxT *ctx,
     const CaqResBitQuantCodeT *dataCaqCode,
     float *resultOut
@@ -654,7 +655,7 @@ void InnerProductU8U8(
 
     *resultOut = (float)ipReal;
 }
-// void InnerProductU8U8(
+// void InnerProductRestBit(
 //     const RestBitL2EstimatorCtxT *ctx,
 //     const CaqResBitQuantCodeT *dataCaqCode,
 //     float *resultOut
@@ -742,7 +743,7 @@ void ResBitCaqEstimateDistance(
     // 2. 提取低位贡献：使用专门的函数计算低位整数编码与 query 的实数解码进行内积
     // 该写法便于后续对低位内积计算进行 SIMD 优化
     float realQueryIpF;
-    InnerProductU8U8(ctx, dataCaqCode, &realQueryIpF);
+    InnerProductRestBit(ctx, dataCaqCode, &realQueryIpF);
     float caqDelta = ctx->caqDelta;
     float qDelta = ctx->queryQuantCode->delta;
     float qMin = ctx->queryQuantCode->residualQueryMin;
