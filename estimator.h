@@ -185,7 +185,7 @@ void DestroyRestBitL2EstimatorCtx(RestBitL2EstimatorCtxT **ctx) {
  * 2. ARM NEON 指令集的实现
  * 3. 若均不支持，则使用普通 C 语言实现，该实现无需 QueryQuantizerLayoutT::LAYOUT_SEPARATED 布局支持
  */
-#if (defined(__x86_64__) && defined(__AVX__))
+#if (defined(SIMD_AVX_ENABLED))
 
 // 是否需要对 query 量化编码使用分离式布局以提升 SIMD 计算效率，开启需要同步预处理 query 编码
 #define USE_SEPARATED_QUERY_LAYOUT
@@ -468,7 +468,7 @@ void InnerProductRestBit(
     *resultOut = (float)ipReal;
 }
 
-#elif (defined(__aarch64__) && defined(__ARM_NEON))
+#elif (defined(SIMD_NEON_ENABLED))
 
 float estimateOneBitIp(
     const OneBitL2CaqEstimatorCtxT *ctx,

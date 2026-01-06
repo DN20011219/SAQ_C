@@ -185,7 +185,7 @@ void destroyRotatorMatrix(float **P)
     }
 }
 
-#if (defined(__x86_64__) && defined(__AVX__))
+#if (defined(SIMD_AVX_ENABLED))
 
 void rotateVector(
     const float* P,
@@ -222,7 +222,7 @@ void rotateVector(
     }
 }
 
-#elif (defined(__aarch64__) && defined(__ARM_NEON))
+#elif (defined(SIMD_NEON_ENABLED))
 void rotateVector(
     const float* P,
     const float* vec_in,

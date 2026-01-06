@@ -397,7 +397,7 @@ void QuantizeQueryVector(const QueryQuantizerCtxT *ctx,
 #endif
 
     // Step 4: 根据布局调整量化编码存储方式
-#ifdef SIMD_MAX_CAPACITY
+#if (defined(SIMD_AVX_ENABLED) || defined(SIMD_NEON_ENABLED))
         // 分离式布局，需要将量化编码重新排列
     size_t numBlocks = 0;
     TransposeU8ToBitplanes(
@@ -412,7 +412,7 @@ void QuantizeQueryVector(const QueryQuantizerCtxT *ctx,
 #endif
 #endif
 #ifdef QUERY_QUANTIZER_PROFILE
-#ifndef SIMD_MAX_CAPACITY
+#ifndef (defined(SIMD_AVX_ENABLED) || defined(SIMD_NEON_ENABLED))
     t_after_layout = t_after_quant;
 #endif
     int64_t total_ns = QueryQuantizerDiffNs(&t_start, &t_after_layout);
@@ -483,7 +483,7 @@ void GetOriQueryCodeValue(
     *value = (uint32_t)(val);
 }
 
-#ifdef SIMD_MAX_CAPACITY
+#if (defined(SIMD_AVX_ENABLED) || defined(SIMD_NEON_ENABLED))
 /**
  * 获取 query 量化编码在指定维度块和 bit 平面的指针（分离式布局）
  */

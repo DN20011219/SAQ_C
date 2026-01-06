@@ -7,7 +7,6 @@
 #include <math.h>
 #include <stdio.h>
 #include <stdbool.h>
-#include <immintrin.h>
 
 #include "native_check.h"
 #include "encoder.h"

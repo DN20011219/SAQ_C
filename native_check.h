@@ -7,11 +7,13 @@
 
 #include <immintrin.h>
 #define SIMD_MAX_CAPACITY 256  // __AVX__ 的 SIMD 最大并行计算容量为 256 位
+#define SIMD_AVX_ENABLED
 
 #elif !defined(SAQ_DISABLE_SIMD) && defined(__aarch64__) && defined(__ARM_NEON)
 
 #include <arm_neon.h>
 #define SIMD_MAX_CAPACITY 128  // __ARM_NEON 的 SIMD 最大并行计算容量为 128 位
+#define SIMD_NEON_ENABLED
 
 #else
 
