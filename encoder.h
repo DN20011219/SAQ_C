@@ -19,6 +19,7 @@
 typedef struct {
     uint8_t* storedCodes;           // 每个维度的最高位 1bit 编码
     float oriVecL2Norm;             // |o|, 放缩后的原始向量的 L2 范数
+    uint64_t totalPopcount;         // 预计算的 1bit popcount，总计所有 block
 } CaqOneBitQuantCodeT;
 typedef struct {
     uint8_t* storedCodes;           // 除了最高位 1bit 外，其余低位 N-1 bit 编码
@@ -46,6 +47,7 @@ void CreateCaqOneBitQuantCode(CaqOneBitQuantCodeT **res, size_t dim) {
     size_t mallocSize = getCaqOneBitQuantCodeSize(dim);
     (*res)->storedCodes = (uint8_t*)malloc(mallocSize);
     (*res)->oriVecL2Norm = 0.0f;
+    (*res)->totalPopcount = 0ull;
     memset((*res)->storedCodes, 0, mallocSize);
 }
 
@@ -68,6 +70,7 @@ void DestroyCaqOneBitQuantCode(CaqOneBitQuantCodeT **code) {
         free((*code)->storedCodes);
         (*code)->storedCodes = NULL;
     }
+    (*code)->totalPopcount = 0ull;
     free(*code);
     *code = NULL;
 }
@@ -379,6 +382,7 @@ void SeparateCode(
     resBit->rescaleFactor = caqCode->rescaleFactor;
     uint32_t numBits = (uint32_t)cfg->numBits;
     uint32_t resBits = numBits - 1;
+    oneBit->totalPopcount = 0ull;
 
     for (size_t i = 0; i < cfg->dimPadded; ++i) {
         uint32_t code = caqCode->codes[i];
@@ -389,6 +393,7 @@ void SeparateCode(
         size_t byteIdx1 = i / 8;
         size_t bitIdx1 = i % 8;
         oneBit->storedCodes[byteIdx1] |= (highBit << bitIdx1);
+        oneBit->totalPopcount += (uint64_t)highBit;
 
         // 存储低位 N-1 bit
         resBit->storedCodes[i] = lowBits;

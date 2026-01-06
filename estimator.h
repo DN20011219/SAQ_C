@@ -208,19 +208,13 @@ float estimateOneBitIp(
     size_t bytesPerBlock = GetBytesPerSimdBlock(); // 32 bytes in AVX, but 16 bytes for NEON
     const QueryQuantCodeT *queryCode = ctx->queryQuantCode;
     uint64_t ipEstimate = 0;
-    uint64_t ppcScalar = 0;
+    uint64_t ppcScalar = dataCaqCode->totalPopcount; // 1bit popcount 在量化时已统计
     uint64_t tmp64[2]; // 存放 16B AND 结果，便于 popcount
     uint8_t *qBlock;
 
     for (int j = 0; j < (int)BlockNum; ++j) {
         const uint8_t *dBlock = dataCaqCode->storedCodes + j * bytesPerBlock;
-        // 统计当前 block 的 1bit 编码中 1 的个数
-        // for (int k = 0; k < 4; ++k) { // 循环展开优化
-        ppcScalar += __builtin_popcountll(((const uint64_t*)dBlock)[0]);
-        ppcScalar += __builtin_popcountll(((const uint64_t*)dBlock)[1]);
-        ppcScalar += __builtin_popcountll(((const uint64_t*)dBlock)[2]);
-        ppcScalar += __builtin_popcountll(((const uint64_t*)dBlock)[3]);
-        // }
+        // ppcScalar 已预存，无需在查询时重复 popcount
         for (int plane = 0; plane < QUERY_QUANTIZER_NUM_BITS; ++plane) {
             uint64_t partialIp = 0;
 
@@ -260,7 +254,7 @@ float estimateOneBitIp(
     const QueryQuantCodeT *queryCode = ctx->queryQuantCode;
 
     uint64_t ipEstimate = 0;
-    uint64_t ppcScalar  = 0;
+    uint64_t ppcScalar  = dataCaqCode->totalPopcount; // 1bit popcount 在量化时已统计
 
     // popcount buffer
     uint64_t tmp64[2];
@@ -275,18 +269,7 @@ float estimateOneBitIp(
         const uint8_t *dBlock =
             dataCaqCode->storedCodes + j * bytesPerBlock;
 
-        /* --------------------------------------------------
-         * 1. 统计 data block 的 1bit popcount（ppcScalar）
-         * -------------------------------------------------- */
-        const uint64_t *d64 = (const uint64_t *)dBlock;
-        ppcScalar += __builtin_popcountll(d64[0]);
-        ppcScalar += __builtin_popcountll(d64[1]);
-        ppcScalar += __builtin_popcountll(d64[2]);
-        ppcScalar += __builtin_popcountll(d64[3]);
-
-        /* --------------------------------------------------
-         * 2. data block 只 load 一次
-         * -------------------------------------------------- */
+        /* 1bit popcount 已预计算，查询时不再统计；data block 只 load 一次 */
         __m128i d_lo = _mm_loadu_si128((const __m128i *)(dBlock));
         __m128i d_hi = _mm_loadu_si128((const __m128i *)(dBlock + 16));
 
@@ -358,7 +341,6 @@ float estimateOneBitIp(
     const float queryMin = ctx->queryQuantCode->residualQueryMin + 0.5f * queryDelta;
 
     __m256i ipVec = _mm256_setzero_si256();
-    __m256i ppcVec = _mm256_setzero_si256();
 
     for (size_t i = 0; i < D; i += 32) {
         uint32_t bits32 = *(uint32_t *)(dataCodes + i / 8);
@@ -377,20 +359,18 @@ float estimateOneBitIp(
             __m256i qv = _mm256_cvtepu8_epi32(q8);
 
             ipVec = _mm256_add_epi32(ipVec, _mm256_mullo_epi32(qv, bv));
-            ppcVec = _mm256_add_epi32(ppcVec, bv);
         }
     }
 
     // horizontal add
-    uint32_t ipArr[8], ppcArr[8];
+    uint32_t ipArr[8];
     _mm256_storeu_si256((__m256i*)ipArr, ipVec);
-    _mm256_storeu_si256((__m256i*)ppcArr, ppcVec);
 
-    uint64_t ipSum = 0, ppcSum = 0;
+    uint64_t ipSum = 0;
     for (int k = 0; k < 8; ++k) {
         ipSum += ipArr[k];
-        ppcSum += ppcArr[k];
     }
+    uint64_t ppcSum = dataCaqCode->totalPopcount; // 1bit popcount 在量化时已统计
 
     return queryDelta * (float)ipSum + queryMin * (float)ppcSum;
 }
@@ -470,16 +450,19 @@ void InnerProductRestBit(
 
 #elif (defined(SIMD_NEON_ENABLED))
 
+/**
+ * 1bit IP 估计（NEON 优化版，分离式 query layout，需要对 query 做转置）
+ */
 float estimateOneBitIp(
     const OneBitL2CaqEstimatorCtxT *ctx,
     const CaqOneBitQuantCodeT *dataCaqCode
 ) {
     size_t BlockNum = GetOneBitCodeSimdBlockNum(ctx->dim);
-    size_t bytesPerBlock = GetBytesPerSimdBlock(); // 32 bytes
+    size_t bytesPerBlock = GetBytesPerSimdBlock(); // 32 bytes in AVX, but 16 bytes for NEON
     const QueryQuantCodeT *queryCode = ctx->queryQuantCode;
-
+    
     uint64_t ipEstimate = 0;
-    uint64_t ppcScalar = 0;
+    uint64_t ppcScalar = dataCaqCode->totalPopcount; // 1bit popcount 在量化时已统计
 
     uint64_t tmp64[2];   // 用于 popcount
     uint8_t *qBlock;
@@ -487,9 +470,7 @@ float estimateOneBitIp(
     for (size_t j = 0; j < BlockNum; ++j) {
         const uint8_t *dBlock = dataCaqCode->storedCodes + j * bytesPerBlock;
 
-        // 统计当前 block 中 data 1bit 的 popcount（NEON block = 16 bytes）
-        const uint64_t *d64 = (const uint64_t *)dBlock;
-        ppcScalar += __builtin_popcountll(d64[0]) + __builtin_popcountll(d64[1]);
+        // 1bit popcount 已预存，无需查询时重复统计
 
         for (int plane = 0; plane < QUERY_QUANTIZER_NUM_BITS; ++plane) {
             uint64_t partialIp = 0;
@@ -598,7 +579,7 @@ float estimateOneBitIp(
     const float queryDelta = ctx->queryQuantCode->delta;
     const float queryMin = ctx->queryQuantCode->residualQueryMin + 0.5f * queryDelta;
     uint64_t ipEstimate = 0;
-    uint64_t ppcScalar = 0;
+    uint64_t ppcScalar = dataCaqCode->totalPopcount; // 1bit popcount 在量化时已统计
 
     for (size_t i = 0; i < D; ++i) {
         // Extract i-th bit from dataCodes
@@ -608,7 +589,6 @@ float estimateOneBitIp(
         GetOriQueryCodeValue(ctx->queryQuantCtx, queryCode, i, &qval);
 
         ipEstimate += qval * bit;
-        ppcScalar += bit;
     }
 
     return (queryDelta * (float)ipEstimate) + (queryMin * (float)ppcScalar);
