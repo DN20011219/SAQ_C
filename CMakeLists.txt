@@ -71,5 +71,8 @@ endif()
 if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/estimator_easy_example.c)
   saq_add_exec(estimator_easy_example estimator_easy_example.c)
 endif()
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/estimator_easy_zero_centroid_example.c)
+  saq_add_exec(estimator_easy_zero_centroid_example estimator_easy_zero_centroid_example.c)
+endif()
 
 message(STATUS "SIMD mode: ${SIMD}")

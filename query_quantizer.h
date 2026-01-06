@@ -7,6 +7,7 @@
 #include <math.h>
 #include <stdio.h>
 #include <stdbool.h>
+#include <string.h>
 #include <stdio.h>
 
 // #define QUERY_QUANTIZER_PROFILE
@@ -19,7 +20,8 @@
 #include "rotator.h"
 
 // 默认 query 量化使用 8 bit 以保障精度，可能会影响计算速度
-#define QUERY_QUANTIZER_NUM_BITS 8
+#define QUERY_QUANTIZER_NUM_BITS 4
+// #define QUERY_QUANTIZER_NUM_BITS 8
 
 #ifdef QUERY_QUANTIZER_PROFILE
 static inline int64_t QueryQuantizerDiffNs(const struct timespec *start,
@@ -233,6 +235,42 @@ void TransposeU8ToBitplanes(
     uint8_t *buf = (uint8_t *)calloc(totalBytes, 1);
     if (!buf) {
         *bitplanes = NULL;
+        return;
+    }
+
+    /* SWAR fast path when b == 4 (pure integer bit-gather per 8 codes). */
+    if (b == 4) {
+        const uint64_t PACK_MASK = 0x0101010101010101ull;
+        const uint64_t PACK_MULT = 0x0102040810204080ull; // gathers bits from 8 bytes into one byte
+        const size_t planeStride = numBlocks * BYTES_PER_BLOCK;
+
+        for (size_t blk = 0; blk < numBlocks; ++blk) {
+            size_t base = blk * BLOCK;
+            size_t remain = dim > base ? dim - base : 0;
+            if (remain == 0) break;
+            if (remain > BLOCK) remain = BLOCK;
+
+            uint8_t *planes[4];
+            for (size_t bit = 0; bit < 4; ++bit) {
+                planes[bit] = buf + (4 - 1 - bit) * planeStride + blk * BYTES_PER_BLOCK;
+            }
+
+            for (size_t offset = 0; offset < remain; offset += 8) {
+                size_t chunk = remain - offset;
+                if (chunk > 8) chunk = 8;
+
+                uint64_t lane = 0;
+                memcpy(&lane, codes + base + offset, chunk); // zero-padded tail chunk
+                size_t byteIdx = offset >> 3;
+
+                planes[0][byteIdx] = (uint8_t)(((lane >> 0) & PACK_MASK) * PACK_MULT >> 56);
+                planes[1][byteIdx] = (uint8_t)(((lane >> 1) & PACK_MASK) * PACK_MULT >> 56);
+                planes[2][byteIdx] = (uint8_t)(((lane >> 2) & PACK_MASK) * PACK_MULT >> 56);
+                planes[3][byteIdx] = (uint8_t)(((lane >> 3) & PACK_MASK) * PACK_MULT >> 56);
+            }
+        }
+
+        *bitplanes = buf;
         return;
     }
 

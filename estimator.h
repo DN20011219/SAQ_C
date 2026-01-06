@@ -187,13 +187,19 @@ void DestroyRestBitL2EstimatorCtx(RestBitL2EstimatorCtxT **ctx) {
  */
 #if (defined(__x86_64__) && defined(__AVX__))
 
-
+// 是否需要对 query 量化编码使用分离式布局以提升 SIMD 计算效率，开启需要同步预处理 query 编码
 #define USE_SEPARATED_QUERY_LAYOUT
+// 预先计算分离式布局的 query block 指针，避免每次估计距离时重复计算指针偏移
 #define PRE_COMPUTED_QUERY_BLOCK_PTRS
 
 #ifdef USE_SEPARATED_QUERY_LAYOUT
+
 #ifndef PRE_COMPUTED_QUERY_BLOCK_PTRS
-float estimateOneBitIp(
+
+/**
+ * 1bit IP 估计（纯 AVX 优化版，分离式 query layout，需要对 query 做转置）
+ */
+float estimateOneBitIp( 
     const OneBitL2CaqEstimatorCtxT *ctx,
     const CaqOneBitQuantCodeT *dataCaqCode
 ) {
@@ -243,7 +249,7 @@ float estimateOneBitIp(
 }
 #else
 /**
- * 1bit IP 估计（SSE2 优化版，分离式 query layout）
+ * 1bit IP 估计（SSE2 优化版，分离式 query layout，需要对 query 做转置）
  */
 float estimateOneBitIp(
     const OneBitL2CaqEstimatorCtxT *ctx,
@@ -339,7 +345,7 @@ float estimateOneBitIp(
 #else
 /**
  * AVX2 优化版本，要求 D 是 128 的倍数
- * 无需分离式布局支持，减少pack代价
+ * 无需分离式布局支持，减少pack代价，即不需要预先转置 query 编码
  */
 float estimateOneBitIp(
     const OneBitL2CaqEstimatorCtxT *ctx,
@@ -481,7 +487,7 @@ float estimateOneBitIp(
     for (size_t j = 0; j < BlockNum; ++j) {
         const uint8_t *dBlock = dataCaqCode->storedCodes + j * bytesPerBlock;
 
-        // 统计当前 block 中 data 1bit 的 popcount
+        // 统计当前 block 中 data 1bit 的 popcount，可被优化为 factor ，避免运行时代价
         const uint64_t *d64 = (const uint64_t *)dBlock;
         ppcScalar += __builtin_popcountll(d64[0])
                    + __builtin_popcountll(d64[1])

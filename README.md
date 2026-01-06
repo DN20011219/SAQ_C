@@ -30,7 +30,8 @@ cmake --build . -j
 ./build/encoder_example
 ./build/rotator_example
 ./build/estimator_example 10000 1 256 1234 1                  # data数量 query数量 维度 随机种子 重复次数，B固定为9
-./build/estimator_easy_example 10000 1 256 1234 1 8   # data数量 query数量 维度 随机种子 重复次数 B
+./build/estimator_easy_example 10000 1 256 1234 1 8           # data数量 query数量 维度 随机种子 重复次数 B
+./estimator_easy_zero_centroid_example 10000 1 256 1234 1 8 # data数量 query数量 维度 随机种子 重复次数 B
 ```
 
 预计结果：
