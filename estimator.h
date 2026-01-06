@@ -205,7 +205,7 @@ float estimateOneBitIp(
 ) {
     // 纯 AVX ：使用 128-bit SSE2 对 32B block 分两半处理
     size_t BlockNum = GetOneBitCodeSimdBlockNum(ctx->dim);
-    size_t bytesPerBlock = GetBytesPerSimdBlock(); // 32 bytes
+    size_t bytesPerBlock = GetBytesPerSimdBlock(); // 32 bytes in AVX, but 16 bytes for NEON
     const QueryQuantCodeT *queryCode = ctx->queryQuantCode;
     uint64_t ipEstimate = 0;
     uint64_t ppcScalar = 0;
@@ -487,12 +487,9 @@ float estimateOneBitIp(
     for (size_t j = 0; j < BlockNum; ++j) {
         const uint8_t *dBlock = dataCaqCode->storedCodes + j * bytesPerBlock;
 
-        // 统计当前 block 中 data 1bit 的 popcount，可被优化为 factor ，避免运行时代价
+        // 统计当前 block 中 data 1bit 的 popcount（NEON block = 16 bytes）
         const uint64_t *d64 = (const uint64_t *)dBlock;
-        ppcScalar += __builtin_popcountll(d64[0])
-                   + __builtin_popcountll(d64[1])
-                   + __builtin_popcountll(d64[2])
-                   + __builtin_popcountll(d64[3]);
+        ppcScalar += __builtin_popcountll(d64[0]) + __builtin_popcountll(d64[1]);
 
         for (int plane = 0; plane < QUERY_QUANTIZER_NUM_BITS; ++plane) {
             uint64_t partialIp = 0;
@@ -505,23 +502,13 @@ float estimateOneBitIp(
                 &qBlock
             );
 
-            // 低 16 字节
+            // 单个 16B 块
             uint8x16_t q_lo = vld1q_u8(qBlock);
             uint8x16_t d_lo = vld1q_u8(dBlock);
             uint8x16_t a_lo = vandq_u8(q_lo, d_lo);
             vst1q_u8((uint8_t *)tmp64, a_lo);
 
-            partialIp += __builtin_popcountll(tmp64[0])
-                       + __builtin_popcountll(tmp64[1]);
-
-            // 高 16 字节
-            uint8x16_t q_hi = vld1q_u8(qBlock + 16);
-            uint8x16_t d_hi = vld1q_u8(dBlock + 16);
-            uint8x16_t a_hi = vandq_u8(q_hi, d_hi);
-            vst1q_u8((uint8_t *)tmp64, a_hi);
-
-            partialIp += __builtin_popcountll(tmp64[0])
-                       + __builtin_popcountll(tmp64[1]);
+            partialIp += __builtin_popcountll(tmp64[0]) + __builtin_popcountll(tmp64[1]);
 
             ipEstimate += partialIp
                 * (1ULL << (QUERY_QUANTIZER_NUM_BITS - plane - 1));
