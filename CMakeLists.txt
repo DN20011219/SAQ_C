@@ -34,6 +34,8 @@ elseif(SIMD STREQUAL "NEON")
     list(APPEND SAQ_SIMD_COMPILE_OPTIONS -mfpu=neon)
   endif()
 elseif(SIMD STREQUAL "NONE")
+  # Explicitly disable SIMD usage in code
+  add_compile_definitions(SAQ_DISABLE_SIMD)
   # No SIMD flags
 else()
   # AUTO: leave it to the compiler or user env

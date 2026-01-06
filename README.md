@@ -10,6 +10,7 @@
 set -e
 rm -rf build && mkdir -p build && cd build
 cmake -DSIMD=AVX ..
+cmake -DSIMD=NEON ..
 cmake -DSIMD=NONE .. # 或弃用 SIMD 优化
 cmake --build . -j
 ```
