@@ -307,10 +307,12 @@ void TransposeU8ToBitplanes(
     }
 #endif
 
-    /* NEON path (b <= 8): 32-wide movemask-style packing, pure C + intrinsics (no C++ lambdas). */
+   /* NEON fast path (b <= 8): process 16 codes per iteration, exact layout match. */
 #if defined(SIMD_NEON_ENABLED)
     if (b <= 8) {
         const size_t planeStride = numBlocks * BYTES_PER_BLOCK;
+        const uint8x16_t ones16 = vdupq_n_u8(1);
+        const int8x8_t shifts = vld1_s8((const int8_t[]){0,1,2,3,4,5,6,7});
 
         for (size_t blk = 0; blk < numBlocks; ++blk) {
             size_t base = blk * BLOCK;
@@ -318,29 +320,43 @@ void TransposeU8ToBitplanes(
             if (remain == 0) break;
             if (remain > BLOCK) remain = BLOCK;
 
-            for (size_t offset = 0; offset < remain; offset += 32) {
+            for (size_t offset = 0; offset < remain; offset += 16) {
                 size_t chunk = remain - offset;
-                if (chunk > 32) chunk = 32;
+                if (chunk > 16) chunk = 16;
 
-                uint8_t tmp[32] = {0};
+                uint8_t tmp[16] = {0};
                 memcpy(tmp, codes + base + offset, chunk); // 尾部自动补 0
-                uint8x16_t v0 = vld1q_u8(tmp);
-                uint8x16_t v1 = vld1q_u8(tmp + 16);
+                uint8x16_t v = vld1q_u8(tmp);
 
-                size_t byteIdx = (offset >> 3); // 每 8 维度一个字节，32维度=4字节
+                /* Two output bytes per 16 codes (8+8). */
+                size_t byteIdx = (offset >> 3); // 每 8 维度一个字节
 
                 for (size_t bit = 0; bit < b; ++bit) {
-                    uint8x16_t s0 = vshrq_n_u8(v0, bit);
-                    uint8x16_t s1 = vshrq_n_u8(v1, bit);
-                    uint16_t m0 = Movemask16FromLSB(s0);
-                    uint16_t m1 = Movemask16FromLSB(s1);
-                    uint32_t mask = ((uint32_t)m1 << 16) | (uint32_t)m0;
-
                     uint8_t *dst = buf + (b - 1 - bit) * planeStride + blk * BYTES_PER_BLOCK;
-                    dst[byteIdx + 0] = (uint8_t)(mask & 0xFF);
-                    if (byteIdx + 1 < BYTES_PER_BLOCK) dst[byteIdx + 1] = (uint8_t)((mask >> 8) & 0xFF);
-                    if (byteIdx + 2 < BYTES_PER_BLOCK) dst[byteIdx + 2] = (uint8_t)((mask >> 16) & 0xFF);
-                    if (byteIdx + 3 < BYTES_PER_BLOCK) dst[byteIdx + 3] = (uint8_t)((mask >> 24) & 0xFF);
+
+                    /* Extract this bit and compress across 8 lanes -> 1 byte. */
+                    uint8x16_t m16 = vandq_u8(vshrq_n_u8(v, bit), ones16);
+                    uint8x8_t m_lo = vget_low_u8(m16);
+                    uint8x8_t m_hi = vget_high_u8(m16);
+
+                    /* lane-wise shift to positional weights 1<<lane, then widen-pairwise add to scalar byte */
+                    uint8x8_t w_lo = vshl_u8(m_lo, shifts);
+                    uint16x4_t s16_lo = vpaddl_u8(w_lo);
+                    uint32x2_t s32_lo = vpaddl_u16(s16_lo);
+                    uint64x1_t s64_lo = vpaddl_u32(s32_lo);
+                    uint8_t packed_lo = (uint8_t)vget_lane_u64(s64_lo, 0);
+
+                    uint8x8_t w_hi = vshl_u8(m_hi, shifts);
+                    uint16x4_t s16_hi = vpaddl_u8(w_hi);
+                    uint32x2_t s32_hi = vpaddl_u16(s16_hi);
+                    uint64x1_t s64_hi = vpaddl_u32(s32_hi);
+                    uint8_t packed_hi = (uint8_t)vget_lane_u64(s64_hi, 0);
+
+                    /* 写入 plane 字节。chunk<16 时，tmp 已补 0*/
+                    dst[byteIdx] = packed_lo;
+                    if (byteIdx + 1 < BYTES_PER_BLOCK) {
+                        dst[byteIdx + 1] = packed_hi;
+                    }
                 }
             }
         }
