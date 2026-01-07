@@ -283,7 +283,6 @@ void TransposeU8ToBitplanes(
 #if defined(SIMD_NEON_ENABLED)
     if (b <= 8) {
         const size_t planeStride = numBlocks * BYTES_PER_BLOCK;
-        const uint8x16_t ones16 = vdupq_n_u8(1);
         const int8x8_t shifts = vld1_s8((const int8_t[]){0,1,2,3,4,5,6,7});
 
         for (size_t blk = 0; blk < numBlocks; ++blk) {
@@ -307,22 +306,30 @@ void TransposeU8ToBitplanes(
                     uint8_t *dst = buf + (b - 1 - bit) * planeStride + blk * BYTES_PER_BLOCK;
 
                     /* Extract this bit and compress across 8 lanes -> 1 byte. */
-                    uint8x16_t m16 = vandq_u8(vshrq_n_u8(v, bit), ones16);
-                    uint8x8_t m_lo = vget_low_u8(m16);
-                    uint8x8_t m_hi = vget_high_u8(m16);
+                        uint8x16_t m16 = vshrq_n_u8(v, bit);
+                        uint8x8_t m_lo = vget_low_u8(m16);
+                        uint8x8_t m_hi = vget_high_u8(m16);
 
-                    /* lane-wise shift to positional weights 1<<lane, then widen-pairwise add to scalar byte */
-                    uint8x8_t w_lo = vshl_u8(m_lo, shifts);
-                    uint16x4_t s16_lo = vpaddl_u8(w_lo);
-                    uint32x2_t s32_lo = vpaddl_u16(s16_lo);
-                    uint64x1_t s64_lo = vpaddl_u32(s32_lo);
-                    uint8_t packed_lo = (uint8_t)vget_lane_u64(s64_lo, 0);
+                        /* lane-wise shift to positional weights 1<<lane, then horizontal add to scalar byte */
+                        uint8x8_t w_lo = vshl_u8(m_lo, shifts);
+    #if defined(__aarch64__)
+                        uint8_t packed_lo = vaddv_u8(w_lo);
+    #else
+                        uint16x4_t s16_lo = vpaddl_u8(w_lo);
+                        uint32x2_t s32_lo = vpaddl_u16(s16_lo);
+                        uint64x1_t s64_lo = vpaddl_u32(s32_lo);
+                        uint8_t packed_lo = (uint8_t)vget_lane_u64(s64_lo, 0);
+    #endif
 
-                    uint8x8_t w_hi = vshl_u8(m_hi, shifts);
-                    uint16x4_t s16_hi = vpaddl_u8(w_hi);
-                    uint32x2_t s32_hi = vpaddl_u16(s16_hi);
-                    uint64x1_t s64_hi = vpaddl_u32(s32_hi);
-                    uint8_t packed_hi = (uint8_t)vget_lane_u64(s64_hi, 0);
+                        uint8x8_t w_hi = vshl_u8(m_hi, shifts);
+    #if defined(__aarch64__)
+                        uint8_t packed_hi = vaddv_u8(w_hi);
+    #else
+                        uint16x4_t s16_hi = vpaddl_u8(w_hi);
+                        uint32x2_t s32_hi = vpaddl_u16(s16_hi);
+                        uint64x1_t s64_hi = vpaddl_u32(s32_hi);
+                        uint8_t packed_hi = (uint8_t)vget_lane_u64(s64_hi, 0);
+    #endif
 
                     /* 写入 plane 字节。chunk<16 时，tmp 已补 0*/
                     dst[byteIdx] = packed_lo;
