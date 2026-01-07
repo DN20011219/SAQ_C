@@ -13,6 +13,7 @@ cmake -DSIMD=AVX ..
 cmake -DSIMD=NEON ..
 cmake -DSIMD=NONE .. # 或弃用 SIMD 优化
 cmake --build . -j
+cd ../
 ```
 
 本项目预计支持 AVX 和 NEON 两个 SIMD 版本，以实现低配机器可运行。
@@ -30,7 +31,7 @@ cmake --build . -j
 ```bash
 ./build/encoder_example
 ./build/rotator_example
-./build/estimator_example 10000 1 256 1234 1                  # data数量 query数量 维度 随机种子 重复次数，B固定为9
+./build/estimator_example 100 100 256 1234 1                  # data数量 query数量(用于控制transpose成本) 维度 随机种子 重复次数，B固定为9
 ./build/estimator_easy_example 10000 1 256 1234 1 8           # data数量 query数量 维度 随机种子 重复次数 B
 ./estimator_easy_zero_centroid_example 10000 1 256 1234 1 8 # data数量 query数量 维度 随机种子 重复次数 B
 ```
