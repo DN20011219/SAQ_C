@@ -24,6 +24,7 @@ typedef struct {
 typedef struct {
     uint8_t* storedCodes;           // 除了最高位 1bit 外，其余低位 N-1 bit 编码
     float rescaleFactor;            // 放缩因子，用于将量化向量还原到与原始向量相似的尺度
+    uint64_t sumCodes;              // 低位编码之和，便于后续快速获取 sum(d)
 } CaqResBitQuantCodeT;
 
 size_t getCaqOneBitQuantCodeSize(size_t dim) {
@@ -59,6 +60,7 @@ void CreateCaqResBitQuantCode(CaqResBitQuantCodeT **res, size_t dim, uint32_t re
     size_t mallocSize = getCaqResBitQuantCodeSize(dim, resBits);
     (*res)->storedCodes = (uint8_t*)malloc(mallocSize);
     (*res)->rescaleFactor = 0.0f;
+    (*res)->sumCodes = 0ull;
     memset((*res)->storedCodes, 0, mallocSize);
 }
 
@@ -380,6 +382,7 @@ void SeparateCode(
     CaqResBitQuantCodeT *resBit = *resBitCode;
     oneBit->oriVecL2Norm = caqCode->oriVecL2Norm;
     resBit->rescaleFactor = caqCode->rescaleFactor;
+    resBit->sumCodes = 0ull;
     uint32_t numBits = (uint32_t)cfg->numBits;
     uint32_t resBits = numBits - 1;
     oneBit->totalPopcount = 0ull;
@@ -397,6 +400,7 @@ void SeparateCode(
 
         // 存储低位 N-1 bit
         resBit->storedCodes[i] = lowBits;
+        resBit->sumCodes += (uint64_t)lowBits;
     }
 }
 

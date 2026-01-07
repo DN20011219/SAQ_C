@@ -391,11 +391,10 @@ void InnerProductRestBit(
     const QueryQuantCodeT *queryCode = ctx->queryQuantCode;
     const uint8_t *qCodes = queryCode->quantizedQueryOriCodes;
     const uint8_t *dCodes = dataCaqCode->storedCodes;
+    const uint64_t precomputedSumD = dataCaqCode->sumCodes; // sum(d_i) 预计算，免去查询时累加
 
     __m128i accQD = _mm_setzero_si128(); // 4 x int32 局部累加器
-    __m128i accD  = _mm_setzero_si128(); // 4 x int32 局部累加器
     const __m128i zero = _mm_setzero_si128();
-    const __m128i ones = _mm_set1_epi16(1);
 
     size_t i = 0;
     for (; i + 16 <= D; i += 16) {
@@ -413,32 +412,21 @@ void InnerProductRestBit(
         __m128i sum32_hi = _mm_madd_epi16(q16_hi, d16_hi);
         accQD = _mm_add_epi32(accQD, sum32_lo);
         accQD = _mm_add_epi32(accQD, sum32_hi);
-
-        // sum(d)：与 1 相乘再相邻成对相加
-        __m128i dsum32_lo = _mm_madd_epi16(d16_lo, ones);
-        __m128i dsum32_hi = _mm_madd_epi16(d16_hi, ones);
-        accD = _mm_add_epi32(accD, dsum32_lo);
-        accD = _mm_add_epi32(accD, dsum32_hi);
     }
 
     // 将向量累加器归约到 64-bit 标量
     uint64_t sumQD = 0;
-    uint64_t sumD  = 0;
+    uint64_t sumD  = precomputedSumD;
     {
         // 水平求和 accQD 4 个 32-bit
         __m128i tmp1 = _mm_hadd_epi32(accQD, accQD); // [a0+a1, a2+a3, a0+a1, a2+a3]
         __m128i tmp2 = _mm_hadd_epi32(tmp1, tmp1);   // [sum, sum, sum, sum]
         sumQD = (uint32_t)_mm_cvtsi128_si32(tmp2);
-
-        __m128i d1 = _mm_hadd_epi32(accD, accD);
-        __m128i d2 = _mm_hadd_epi32(d1, d1);
-        sumD = (uint32_t)_mm_cvtsi128_si32(d2);
     }
 
     // 处理尾部
     for (; i < D; ++i) {
         sumQD += (uint64_t)qCodes[i] * (uint64_t)dCodes[i];
-        sumD  += (uint64_t)dCodes[i];
     }
 
     // 提取公因式一次解码
@@ -510,9 +498,9 @@ void InnerProductRestBit(
     const QueryQuantCodeT *queryCode = ctx->queryQuantCode;
     const uint8_t *qCodes = queryCode->quantizedQueryOriCodes;
     const uint8_t *dCodes = dataCaqCode->storedCodes;
+    const uint64_t precomputedSumD = dataCaqCode->sumCodes;
 
     uint32x4_t accQD = vdupq_n_u32(0);  // sum(q * d)
-    uint32x4_t accD  = vdupq_n_u32(0);  // sum(d)
 
     size_t i = 0;
     for (; i + 16 <= D; i += 16) {
@@ -530,10 +518,6 @@ void InnerProductRestBit(
         accQD = vaddq_u32(accQD, vmull_u16(vget_high_u16(q16_lo), vget_high_u16(d16_lo)));
         accQD = vaddq_u32(accQD, vmull_u16(vget_low_u16(q16_hi), vget_low_u16(d16_hi)));
         accQD = vaddq_u32(accQD, vmull_u16(vget_high_u16(q16_hi), vget_high_u16(d16_hi)));
-
-        //  sum(d)
-        accD = vaddq_u32(accD, vpaddlq_u16(d16_lo));
-        accD = vaddq_u32(accD, vpaddlq_u16(d16_hi));
     }
 
     //  水平规约
@@ -543,16 +527,11 @@ void InnerProductRestBit(
         (uint64_t)vgetq_lane_u32(accQD, 2) +
         (uint64_t)vgetq_lane_u32(accQD, 3);
 
-    uint64_t sumD =
-        (uint64_t)vgetq_lane_u32(accD, 0) +
-        (uint64_t)vgetq_lane_u32(accD, 1) +
-        (uint64_t)vgetq_lane_u32(accD, 2) +
-        (uint64_t)vgetq_lane_u32(accD, 3);
+    uint64_t sumD = precomputedSumD;
 
     // 处理尾部
     for (; i < D; ++i) {
         sumQD += (uint64_t)qCodes[i] * (uint64_t)dCodes[i];
-        sumD  += (uint64_t)dCodes[i];
     }
 
     // 解码
@@ -609,14 +588,14 @@ void InnerProductRestBit(
     const QueryQuantCodeT *queryCode = ctx->queryQuantCode;
     const uint8_t *qCodes = queryCode->quantizedQueryOriCodes;
     const uint8_t *dCodes = dataCaqCode->storedCodes;
+    const uint64_t precomputedSumD = dataCaqCode->sumCodes;
 
     // 2. 循环内仅做整数域计算：累计 sum(q_i * d_i) 与 sum(d_i)
     //    将解码的公共因子在循环外一次性应用，减少浮点运算
     uint64_t sumQD = 0; // 累计 q_i * d_i
-    uint64_t sumD  = 0; // 累计 d_i
+    uint64_t sumD  = precomputedSumD; // d_i 总和已在编码阶段预计算
     for (size_t i = 0; i < D; ++i) {
         sumQD += (uint64_t)qCodes[i] * (uint64_t)dCodes[i];
-        sumD  += (uint64_t)dCodes[i];
     }
 
     // 3. 提取公因式解码：
