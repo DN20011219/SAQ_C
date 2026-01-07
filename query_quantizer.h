@@ -152,6 +152,34 @@ void DestroyQueryQuantCode(QueryQuantCodeT **code) {
 }
 
 #ifdef SIMD_MAX_CAPACITY
+
+#if defined(SIMD_NEON_ENABLED)
+static inline uint16_t Movemask16FromLSB(uint8x16_t x) {
+    static const int8_t shift_arr[8] = {0, 1, 2, 3, 4, 5, 6, 7};
+    const int8x8_t shifts = vld1_s8(shift_arr);
+
+    uint8x8_t lo = vget_low_u8(x);
+    uint8x8_t hi = vget_high_u8(x);
+    uint8x8_t w_lo = vshl_u8(lo, shifts);
+    uint8x8_t w_hi = vshl_u8(hi, shifts);
+#if defined(__aarch64__)
+    uint8_t packed_lo = vaddv_u8(w_lo);
+    uint8_t packed_hi = vaddv_u8(w_hi);
+#else
+    uint16x4_t s16_lo = vpaddl_u8(w_lo);
+    uint32x2_t s32_lo = vpaddl_u16(s16_lo);
+    uint64x1_t s64_lo = vpaddl_u32(s32_lo);
+    uint8_t packed_lo = (uint8_t)vget_lane_u64(s64_lo, 0);
+
+    uint16x4_t s16_hi = vpaddl_u8(w_hi);
+    uint32x2_t s32_hi = vpaddl_u16(s16_hi);
+    uint64x1_t s64_hi = vpaddl_u32(s32_hi);
+    uint8_t packed_hi = (uint8_t)vget_lane_u64(s64_hi, 0);
+#endif
+    return (uint16_t)(packed_lo | ((uint16_t)packed_hi << 8));
+}
+#endif
+
 void PrintCodesByDim(
     const uint8_t *codes,
     size_t dim,
@@ -279,34 +307,10 @@ void TransposeU8ToBitplanes(
     }
 #endif
 
-    /* NEON fast path (b <= 8): process 32 codes per iteration with movemask-style packing. */
+    /* NEON path (b <= 8): 32-wide movemask-style packing, pure C + intrinsics (no C++ lambdas). */
 #if defined(SIMD_NEON_ENABLED)
     if (b <= 8) {
         const size_t planeStride = numBlocks * BYTES_PER_BLOCK;
-        const int8x8_t shifts = vld1_s8((const int8_t[]){0,1,2,3,4,5,6,7});
-
-        auto movemask16 = [&](uint8x16_t x) -> uint16_t {
-            uint8x16_t msb = vshrq_n_u8(x, 7);
-            uint8x8_t m_lo = vget_low_u8(msb);
-            uint8x8_t m_hi = vget_high_u8(msb);
-            uint8x8_t w_lo = vshl_u8(m_lo, shifts);
-            uint8x8_t w_hi = vshl_u8(m_hi, shifts);
-#if defined(__aarch64__)
-            uint8_t packed_lo = vaddv_u8(w_lo);
-            uint8_t packed_hi = vaddv_u8(w_hi);
-#else
-            uint16x4_t s16_lo = vpaddl_u8(w_lo);
-            uint32x2_t s32_lo = vpaddl_u16(s16_lo);
-            uint64x1_t s64_lo = vpaddl_u32(s32_lo);
-            uint8_t packed_lo = (uint8_t)vget_lane_u64(s64_lo, 0);
-
-            uint16x4_t s16_hi = vpaddl_u8(w_hi);
-            uint32x2_t s32_hi = vpaddl_u16(s16_hi);
-            uint64x1_t s64_hi = vpaddl_u32(s32_hi);
-            uint8_t packed_hi = (uint8_t)vget_lane_u64(s64_hi, 0);
-#endif
-            return (uint16_t)(packed_lo | ((uint16_t)packed_hi << 8));
-        };
 
         for (size_t blk = 0; blk < numBlocks; ++blk) {
             size_t base = blk * BLOCK;
@@ -326,12 +330,13 @@ void TransposeU8ToBitplanes(
                 size_t byteIdx = (offset >> 3); // 每 8 维度一个字节，32维度=4字节
 
                 for (size_t bit = 0; bit < b; ++bit) {
-                    uint8_t *dst = buf + (b - 1 - bit) * planeStride + blk * BYTES_PER_BLOCK;
-
-                    uint16_t m0 = movemask16(vshrq_n_u8(v0, bit));
-                    uint16_t m1 = movemask16(vshrq_n_u8(v1, bit));
+                    uint8x16_t s0 = vshrq_n_u8(v0, bit);
+                    uint8x16_t s1 = vshrq_n_u8(v1, bit);
+                    uint16_t m0 = Movemask16FromLSB(s0);
+                    uint16_t m1 = Movemask16FromLSB(s1);
                     uint32_t mask = ((uint32_t)m1 << 16) | (uint32_t)m0;
 
+                    uint8_t *dst = buf + (b - 1 - bit) * planeStride + blk * BYTES_PER_BLOCK;
                     dst[byteIdx + 0] = (uint8_t)(mask & 0xFF);
                     if (byteIdx + 1 < BYTES_PER_BLOCK) dst[byteIdx + 1] = (uint8_t)((mask >> 8) & 0xFF);
                     if (byteIdx + 2 < BYTES_PER_BLOCK) dst[byteIdx + 2] = (uint8_t)((mask >> 16) & 0xFF);
