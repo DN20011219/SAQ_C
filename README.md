@@ -98,6 +98,46 @@ Max abs error: 42.528992  # 1bit估算的最大绝对误差
 Max rel error: 0.254242   # 1bit估算的最大相对误差
 ```
 
+IVF 测试预计结果:
+
+```bash
+(base) dn@ubun:~/projects/SAQ_C$ ./build/ivf_ann_test wiki1m 5533 9 700 100
+Config:
+  dataset=wiki1m C=5533 numBits=9 nprobe=700 topK=100
+Paths:
+  base=data/wiki1m/wiki1m_base.fvecs
+  query=data/wiki1m/wiki1m_query.fvecs
+  groundtruth=data/wiki1m/wiki1m_groundtruth.ivecs
+  centroids=data/wiki1m/wiki1m_centroid_5533.fvecs
+  assignments=data/wiki1m/wiki1m_cluster_id_5533.ivecs
+Loaded:
+  base: N=1000000 D=384
+  queries: N=14722 D=384
+  centroids: K=5533 D=384
+Assignments loaded: N=1000000 D=1
+Building IVF using assignments mapping.
+Building IVF: 1000000/1000000 (100.0%)
+IVF built: N=1000000 K=5533 D=384 in 28884.678 ms
+  recall@100 = 0.9964
+Queries: 147/14722 (1.0%)  recall@100 = 0.9950
+Queries: 294/14722 (2.0%)  recall@100 = 0.9937
+Queries: 441/14722 (3.0%)  recall@100 = 0.9937
+Queries: 588/14722 (4.0%)  recall@100 = 0.9930
+Queries: 735/14722 (5.0%)  recall@100 = 0.9925
+Queries: 882/14722 (6.0%)  recall@100 = 0.9923
+Queries: 1029/14722 (7.0%)  recall@100 = 0.9922
+Queries: 1176/14722 (8.0%)  recall@100 = 0.9917
+Queries: 1323/14722 (9.0%)  recall@100 = 0.9907
+Queries: 1470/14722 (10.0%)  recall@100 = 0.9899
+Queries: 1617/14722 (11.0%)  recall@100 = 0.9900
+Queries: 1764/14722 (12.0%)  recall@100 = 0.9899
+Queries: 1911/14722 (13.0%)  recall@100 = 0.9899
+Queries: 2058/14722 (14.0%)  recall@100 = 0.9901
+Queries: 2205/14722 (15.0%)  recall@100 = 0.9903
+Queries: 2352/14722 (16.0%)  recall@100 = 0.9906
+Queries: 2499/14722 (17.0%)  recall@100 = 0.9906
+```
+
 # 移植差异说明
 
 ## 1. 编码器差异
