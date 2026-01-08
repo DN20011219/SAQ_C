@@ -77,4 +77,9 @@ if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/estimator_easy_zero_centroid_example.c)
   saq_add_exec(estimator_easy_zero_centroid_example estimator_easy_zero_centroid_example.c)
 endif()
 
+# IVF ANN test
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/ivf_ann_test.c)
+  saq_add_exec(ivf_ann_test ivf_ann_test.c)
+endif()
+
 message(STATUS "SIMD mode: ${SIMD}")

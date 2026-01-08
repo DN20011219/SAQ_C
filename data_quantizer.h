@@ -26,15 +26,21 @@ typedef struct {
     float *centroid;                // 质心指针，同量化上下文的向量都使用一个相同的质心进行残差化
     CaqEncodeConfig *encodeConfig;  // 量化配置指针，同量化上下文的向量的编码配置相同
 
+    bool ownsRotatorMatrix;         // 是否由本上下文负责释放 rotatorMatrix
+    bool ownsEncodeConfig;          // 是否由本上下文负责释放 encodeConfig
+
     float *residualVector;          // 用于存储残差向量的缓冲区指针，避免每次量化都分配内存
     float *rotatedVector;           // 用于存储旋转后向量的缓冲区指针，避免每次量化都分配内存
 } CaqQuantizerCtxT;
 
-void CaqQuantizerInit(CaqQuantizerCtxT **ctx,
-                         size_t dim,
-                         float *centroid,
-                         size_t numBits,
-                         bool useSeparateStorage
+void CaqQuantizerInitShared(
+    CaqQuantizerCtxT **ctx,
+    size_t dim,
+    float *centroid,
+    size_t numBits,
+    bool useSeparateStorage,
+    float *sharedRotatorMatrix,         // 若传入非 NULL，则共享该旋转矩阵
+    CaqEncodeConfig *sharedEncodeConfig // 若传入非 NULL，则共享该编码配置
 ) {
     *ctx = (CaqQuantizerCtxT *)malloc(sizeof(CaqQuantizerCtxT));
     if (*ctx == NULL) {
@@ -44,8 +50,32 @@ void CaqQuantizerInit(CaqQuantizerCtxT **ctx,
     (*ctx)->centroid = centroid;                                    // 质心数据指针由外部传入管理
     (*ctx)->residualVector = (float *)malloc(sizeof(float) * dim);  // 分配残差向量缓冲区
     (*ctx)->rotatedVector = (float *)malloc(sizeof(float) * dim);   // 分配旋转后向量缓冲区
-    createRotatorMatrix(&(*ctx)->rotatorMatrix, dim);
-    CreateCaqEncodeConfig(dim, numBits, useSeparateStorage, &(*ctx)->encodeConfig); // Encoder 和 量化器同生命周期，因此由量化器创建和销毁
+
+    if (sharedRotatorMatrix) {
+        (*ctx)->rotatorMatrix = sharedRotatorMatrix;
+        (*ctx)->ownsRotatorMatrix = false;
+    } else {
+        createRotatorMatrix(&(*ctx)->rotatorMatrix, dim);
+        (*ctx)->ownsRotatorMatrix = true;
+    }
+
+    if (sharedEncodeConfig) {
+        (*ctx)->encodeConfig = sharedEncodeConfig;
+        (*ctx)->ownsEncodeConfig = false;
+    } else {
+        CreateCaqEncodeConfig(dim, numBits, useSeparateStorage, &(*ctx)->encodeConfig);
+        (*ctx)->ownsEncodeConfig = true;
+    }
+}
+
+void CaqQuantizerInit(CaqQuantizerCtxT **ctx,
+                         size_t dim,
+                         float *centroid,
+                         size_t numBits,
+                         bool useSeparateStorage
+) {
+    // 默认创建自有的旋转矩阵与编码配置
+    CaqQuantizerInitShared(ctx, dim, centroid, numBits, useSeparateStorage, NULL, NULL);
 }
 
 void CaqQuantizerDestroy(CaqQuantizerCtxT **ctx) {
@@ -60,8 +90,12 @@ void CaqQuantizerDestroy(CaqQuantizerCtxT **ctx) {
         free((*ctx)->rotatedVector);
         (*ctx)->rotatedVector = NULL;
     }
-    destroyRotatorMatrix(&(*ctx)->rotatorMatrix);
-    DestroyCaqQuantConfig(&(*ctx)->encodeConfig);
+    if ((*ctx)->ownsRotatorMatrix) {
+        destroyRotatorMatrix(&(*ctx)->rotatorMatrix);
+    }
+    if ((*ctx)->ownsEncodeConfig) {
+        DestroyCaqQuantConfig(&(*ctx)->encodeConfig);
+    }
     free(*ctx);
     *ctx = NULL;
 }

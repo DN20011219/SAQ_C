@@ -33,7 +33,10 @@ cd ../
 ./build/rotator_example
 ./build/estimator_example 100 100 256 1234 1                  # data数量 query数量(用于控制transpose成本) 维度 随机种子 重复次数，B固定为9
 ./build/estimator_easy_example 10000 1 256 1234 1 8           # data数量 query数量 维度 随机种子 重复次数 B
-./estimator_easy_zero_centroid_example 10000 1 256 1234 1 8 # data数量 query数量 维度 随机种子 重复次数 B
+./estimator_easy_zero_centroid_example 10000 1 256 1234 1 8   # data数量 query数量 维度 随机种子 重复次数 B
+
+# dataset C [numBits] [nprobe] [topK]（详细定义请阅读data目录下的README.md）
+./build/ivf_ann_test wiki1m 5533 9 50 100
 ```
 
 预计结果：
