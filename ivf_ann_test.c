@@ -218,10 +218,9 @@ static void ivf_search_one(const IVFIndex *index,
     CaqScannerCtxT *scannerCtx = NULL;
     CreateCaqScannerCtx(&scannerCtx);
 
-    // keep only current topK; gate with 1-bit distance before computing rest-bit
+    // keep only current topK candidates (refined distance)
     size_t sz = 0; // current number of kept candidates
     Result *cands = (Result *)malloc(sizeof(Result) * topK);
-    float *gates = (float *)malloc(sizeof(float) * topK); // store 1-bit distances for gating
 
     for (size_t pi = 0; pi < nprobe; ++pi) {
         Cluster const *cl = &index->clusters[probe_ids[pi]];
@@ -246,19 +245,11 @@ static void ivf_search_one(const IVFIndex *index,
         for (size_t j = 0; j < cl->size; ++j) {
             float d1 = 0.0f, d2 = 0.0f;
             OneBitCaqEstimateDistance(estCtx, cl->oneBitCodes[j], &d1);
-
-            // Gating: only compute rest-bit distance if 1-bit distance could enter topK
-            if (sz >= topK) {
-                float gate_thresh = max_gate_value(gates, sz);
-                if (d1 >= gate_thresh) { continue; }
-            }
-
             ResBitCaqEstimateDistance(restCtx, cl->resBitCodes[j], &d2);
 
             if (sz < topK) {
                 cands[sz].id = cl->ids[j];
                 cands[sz].dist = d2;
-                gates[sz] = d1;
                 ++sz;
             } else {
                 // Replace worst current candidate by refined distance
@@ -266,7 +257,6 @@ static void ivf_search_one(const IVFIndex *index,
                 if (d2 < cands[worst_idx].dist) {
                     cands[worst_idx].id = cl->ids[j];
                     cands[worst_idx].dist = d2;
-                    gates[worst_idx] = d1;
                 }
             }
         }
@@ -281,7 +271,6 @@ static void ivf_search_one(const IVFIndex *index,
     for (size_t i = ret; i < topK; ++i) { out[i].id = -1; out[i].dist = INFINITY; }
 
     DestroyCaqScannerCtx(&scannerCtx);
-    free(gates);
     free(cands);
     free(probe_ids);
 }

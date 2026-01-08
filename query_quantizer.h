@@ -20,8 +20,9 @@
 #include "rotator.h"
 
 // 默认 query 量化使用 8 bit 以保障精度，可能会影响计算速度
-#define QUERY_QUANTIZER_NUM_BITS 4
-// #define QUERY_QUANTIZER_NUM_BITS 8
+// #define QUERY_QUANTIZER_NUM_BITS 4
+// #define QUERY_QUANTIZER_NUM_BITS 6
+#define QUERY_QUANTIZER_NUM_BITS 8
 
 #ifdef QUERY_QUANTIZER_PROFILE
 static inline int64_t QueryQuantizerDiffNs(const struct timespec *start,

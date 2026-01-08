@@ -4,6 +4,41 @@
 
 ## 运行测试说明
 
+### 宏参数说明：
+
+1. QUERY_QUANTIZER_PROFILE
+   - 含义：开启 Query 量化阶段的轻量级性能分析（计时钩子）。默认关闭。
+   - 影响：仅增加少量计时开销，不改变算法结果。
+   - 配置方式：在 `query_quantizer.h` 中取消注释 `#define QUERY_QUANTIZER_PROFILE`。
+     - 也可用编译器宏开启，但为避免重定义告警，建议直接编辑头文件。
+
+2. **QUERY_QUANTIZER_NUM_BITS（重要）**
+   - 含义：Query 量化位数（≤ 8），与数据库编码进行匹配以加速距离计算。仓库默认 `6` 位。
+   - 取值建议：
+     - 4：更快，精度略降；
+     - 6：速度/精度均衡（默认，但在部分数据集上难以实现 recall@P99 ）；
+     - 8：更高精度，速度略慢（可实现 recall@P99 ）。
+   - 配置方式：在 `query_quantizer.h` 顶部修改对应的宏定义（示例有 4/6/8 三档）。
+     - 注意：该宏在头文件中直接定义，使用 `-DQUERY_QUANTIZER_NUM_BITS=...` 可能产生重定义告警，推荐直接编辑头文件。
+
+3. Householder_Random_Orthogonal_Matrix 与 Haar_Random_Orthogonal_Matrix
+   - 含义：正交矩阵生成方式的二选一开关（见 `rotator.h`）。
+   - 对比：
+     - Householder（默认）：L2 范数误差更低（~1e-6），旋转幅度较小；
+     - Haar：服从 Haar 分布更均匀，L2 误差略高（~1e-5）。
+   - 配置方式：编辑 `rotator.h` 顶部宏，注释/取消注释其中一项。
+     - 或使用编译器宏（需同时“去定义”另一项）：
+       ```bash
+       cmake -DCMAKE_C_FLAGS="-DHaar_Random_Orthogonal_Matrix -UHouseholder_Random_Orthogonal_Matrix" ..
+       ```
+
+4. ADJUST_ROUND_LIMIT 及 ADJUST_EPSILON
+   - 含义：编码器（`encoder.h`）中量化后“编码调整”过程的控制参数。
+     - `ADJUST_ROUND_LIMIT`：最大调整轮数（默认 6），更大值→更强的编码优化→更慢；
+     - `ADJUST_EPSILON`：调整判定阈值（默认 1e-8），更小值→更敏感→可能更慢但略提精度。
+   - 配置方式：在 `encoder.h` 顶部修改宏定义。
+     - 若用编译器宏覆盖，需确保不与头文件值冲突以避免重定义告警。
+
 ### 编译：
 
 ```bash
@@ -36,7 +71,7 @@ cd ../
 ./estimator_easy_zero_centroid_example 10000 1 256 1234 1 8   # data数量 query数量 维度 随机种子 重复次数 B
 
 # dataset C [numBits] [nprobe] [topK]（详细定义请阅读data目录下的README.md）
-./build/ivf_ann_test wiki1m 5533 9 50 100
+./build/ivf_ann_test wiki1m 5533 9 200 100
 ```
 
 预计结果：
