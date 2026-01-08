@@ -420,12 +420,18 @@ int main(int argc, char **argv) {
     // Run queries
     Result *top = (Result *)malloc(sizeof(Result) * topK);
     double recall_sum = 0.0;
+    double lat_sum_ms = 0.0;     // running sum of per-query latency (ms)
+    double lat_min_ms = INFINITY; // min latency observed
+    double lat_max_ms = 0.0;      // max latency observed
     size_t qstep = progress_step(queries.n);
     for (size_t qi = 0; qi < queries.n; ++qi) {
         clock_gettime(CLOCK_MONOTONIC, &t0);
         ivf_search_one(&index, queries.data + qi * queries.d, numBits, nprobe, topK, top);
         clock_gettime(CLOCK_MONOTONIC, &t1);
         double q_ms = (t1.tv_sec - t0.tv_sec) * 1000.0 + (t1.tv_nsec - t0.tv_nsec) / 1e6;
+        lat_sum_ms += q_ms;
+        if (q_ms < lat_min_ms) lat_min_ms = q_ms;
+        if (q_ms > lat_max_ms) lat_max_ms = q_ms;
         // fprintf(stdout, "Query %zu: time=%.3f ms\n", qi, q_ms);
         // for (size_t i = 0; i < topK; ++i) {
         //     fprintf(stdout, "  #%zu id=%d dist=%.6f\n", i, top[i].id, top[i].dist);
@@ -448,7 +454,9 @@ int main(int argc, char **argv) {
             recall_sum += r;
         }
         if (((qi + 1) % qstep) == 0 || (qi + 1) == queries.n) {
+            double avg_ms = lat_sum_ms / (double)(qi + 1);
             fprintf(stdout, "  recall@%zu = %.4f\n", topK, recall_sum / (double)(qi + 1));
+            fprintf(stdout, "  latency(ms): avg=%.3f min=%.3f max=%.3f\n", avg_ms, lat_min_ms, lat_max_ms);
             print_progress("Queries", qi + 1, queries.n);
         }
     }
