@@ -451,7 +451,7 @@ int main(int argc, char **argv) {
             for (size_t i = 0; i < topK; ++i) {
                 int id = top[i].id;
                 // linear search is fine for small K
-                for (size_t j = 0; j < kgt; ++j) {
+                for (size_t j = 0; j < denom; ++j) {
                     if (gtrow[j] == id) { ++hit; break; }
                 }
             }
