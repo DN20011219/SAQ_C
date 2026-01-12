@@ -48,6 +48,7 @@ cmake -DSIMD=AVX ..
 cmake -DSIMD=NEON ..
 cmake -DSIMD=NONE .. # 或弃用 SIMD 优化
 cmake --build . -j
+rm -rf build && mkdir -p build && cd build && cmake -DSIMD=AVX .. && cmake --build . -j && cd ../
 cd ../
 ```
 
@@ -72,6 +73,9 @@ cd ../
 
 # dataset C [numBits] [nprobe] [topK]（详细定义请阅读data目录下的README.md）
 ./build/ivf_ann_test wiki1m 5533 9 600 100
+
+# u8u8 内积跨平台调优
+./build/u8u8_perf
 ```
 
 预计结果：

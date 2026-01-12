@@ -82,4 +82,9 @@ if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/ivf_ann_test.c)
   saq_add_exec(ivf_ann_test ivf_ann_test.c)
 endif()
 
+# Perf: u8u8 dot-product microbenchmark
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/perf/u8u8_perf.c)
+  saq_add_exec(u8u8_perf perf/u8u8_perf.c)
+endif()
+
 message(STATUS "SIMD mode: ${SIMD}")
