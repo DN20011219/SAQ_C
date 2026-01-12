@@ -210,7 +210,9 @@ static void ivf_search_one(const IVFIndex *index,
                            size_t numBits,
                            size_t nprobe,
                            size_t topK,
-                           Result *out) {
+                           Result *out,
+                           size_t *onebit_calls_out,
+                           size_t *restbit_calls_out) {
     size_t *probe_ids = (size_t *)malloc(sizeof(size_t) * nprobe);
     select_nprobe(index, query, nprobe, probe_ids);
 
@@ -218,9 +220,13 @@ static void ivf_search_one(const IVFIndex *index,
     CaqScannerCtxT *scannerCtx = NULL;
     CreateCaqScannerCtx(&scannerCtx);
 
-    // keep only current topK candidates (refined distance)
+    // keep only current topK; gate with 1-bit distance before computing rest-bit
     size_t sz = 0; // current number of kept candidates
     Result *cands = (Result *)malloc(sizeof(Result) * topK);
+    float *gates = (float *)malloc(sizeof(float) * topK); // store 1-bit distances for gating
+
+    size_t onebit_calls = 0;
+    size_t restbit_calls = 0;
 
     for (size_t pi = 0; pi < nprobe; ++pi) {
         Cluster const *cl = &index->clusters[probe_ids[pi]];
@@ -245,11 +251,21 @@ static void ivf_search_one(const IVFIndex *index,
         for (size_t j = 0; j < cl->size; ++j) {
             float d1 = 0.0f, d2 = 0.0f;
             OneBitCaqEstimateDistance(estCtx, cl->oneBitCodes[j], &d1);
+            ++onebit_calls;
+
+            // Gating: only compute rest-bit distance if 1-bit distance could enter topK
+            if (sz >= topK) {
+                float gate_thresh = max_gate_value(gates, sz);
+                if (d1 >= gate_thresh) { continue; }
+            }
+
             ResBitCaqEstimateDistance(restCtx, cl->resBitCodes[j], &d2);
+            ++restbit_calls;
 
             if (sz < topK) {
                 cands[sz].id = cl->ids[j];
                 cands[sz].dist = d2;
+                gates[sz] = d1;
                 ++sz;
             } else {
                 // Replace worst current candidate by refined distance
@@ -257,6 +273,7 @@ static void ivf_search_one(const IVFIndex *index,
                 if (d2 < cands[worst_idx].dist) {
                     cands[worst_idx].id = cl->ids[j];
                     cands[worst_idx].dist = d2;
+                    gates[worst_idx] = d1;
                 }
             }
         }
@@ -271,10 +288,13 @@ static void ivf_search_one(const IVFIndex *index,
     for (size_t i = ret; i < topK; ++i) { out[i].id = -1; out[i].dist = INFINITY; }
 
     DestroyCaqScannerCtx(&scannerCtx);
+    free(gates);
     free(cands);
     free(probe_ids);
-}
 
+    if (onebit_calls_out) *onebit_calls_out = onebit_calls;
+    if (restbit_calls_out) *restbit_calls_out = restbit_calls;
+}
 static void usage(const char *prog) {
     fprintf(stderr, "Usage: %s <dataset> <C>\n", prog);
         fprintf(stderr, "Usage: %s <dataset> <C> [numBits] [nprobe] [topK]\n", prog);
@@ -418,20 +438,34 @@ int main(int argc, char **argv) {
     }
 
     // Run queries
-    Result *top = (Result *)malloc(sizeof(Result) * topK);
+    size_t ef = 1024 / 2;
+    Result *top = (Result *)malloc(sizeof(Result) * ef);
     double recall_sum = 0.0;
     double lat_sum_ms = 0.0;     // running sum of per-query latency (ms)
     double lat_min_ms = INFINITY; // min latency observed
     double lat_max_ms = 0.0;      // max latency observed
+    size_t onebit_calls_sum = 0;
+    size_t restbit_calls_sum = 0;
     size_t qstep = progress_step(queries.n);
     for (size_t qi = 0; qi < queries.n; ++qi) {
+        size_t onebit_calls = 0;
+        size_t restbit_calls = 0;
         clock_gettime(CLOCK_MONOTONIC, &t0);
-        ivf_search_one(&index, queries.data + qi * queries.d, numBits, nprobe, topK, top);
+        ivf_search_one(&index,
+                       queries.data + qi * queries.d,
+                       numBits,
+                       nprobe,
+                       ef,
+                       top,
+                       &onebit_calls,
+                       &restbit_calls);
         clock_gettime(CLOCK_MONOTONIC, &t1);
         double q_ms = (t1.tv_sec - t0.tv_sec) * 1000.0 + (t1.tv_nsec - t0.tv_nsec) / 1e6;
         lat_sum_ms += q_ms;
         if (q_ms < lat_min_ms) lat_min_ms = q_ms;
         if (q_ms > lat_max_ms) lat_max_ms = q_ms;
+        onebit_calls_sum += onebit_calls;
+        restbit_calls_sum += restbit_calls;
         // fprintf(stdout, "Query %zu: time=%.3f ms\n", qi, q_ms);
         // for (size_t i = 0; i < topK; ++i) {
         //     fprintf(stdout, "  #%zu id=%d dist=%.6f\n", i, top[i].id, top[i].dist);
@@ -455,8 +489,11 @@ int main(int argc, char **argv) {
         }
         if (((qi + 1) % qstep) == 0 || (qi + 1) == queries.n) {
             double avg_ms = lat_sum_ms / (double)(qi + 1);
+            double avg_onebit = (double)onebit_calls_sum / (double)(qi + 1);
+            double avg_restbit = (double)restbit_calls_sum / (double)(qi + 1);
             fprintf(stdout, "  recall@%zu = %.4f\n", topK, recall_sum / (double)(qi + 1));
             fprintf(stdout, "  latency(ms): avg=%.3f min=%.3f max=%.3f\n", avg_ms, lat_min_ms, lat_max_ms);
+            fprintf(stdout, "  calls(avg): onebit=%.1f restbit=%.1f\n", avg_onebit, avg_restbit);
             print_progress("Queries", qi + 1, queries.n);
         }
     }

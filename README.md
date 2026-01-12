@@ -71,7 +71,7 @@ cd ../
 ./estimator_easy_zero_centroid_example 10000 1 256 1234 1 8   # data数量 query数量 维度 随机种子 重复次数 B
 
 # dataset C [numBits] [nprobe] [topK]（详细定义请阅读data目录下的README.md）
-./build/ivf_ann_test wiki1m 5533 9 200 100
+./build/ivf_ann_test wiki1m 5533 9 600 100
 ```
 
 预计结果：
