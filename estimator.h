@@ -120,6 +120,33 @@ void OneBitCaqEstimatorInit(OneBitL2CaqEstimatorCtxT **ctx,
     QuantizeQueryVector(queryQuantCtx, query, &((*ctx)->queryQuantCode));
 }
 
+// 已预旋转质心 + 传入已旋转 query 的初始化版本，避免重复旋转
+void OneBitCaqEstimatorInitRotated(OneBitL2CaqEstimatorCtxT **ctx,
+                         size_t dim,
+                         size_t numBits,
+                         float *rotatorMatrix,
+                         float *centroidRotated,
+                         float *rotatedQuery,
+                         CaqScannerCtxT *scannerCtx
+                         ) {
+    *ctx = (OneBitL2CaqEstimatorCtxT *)malloc(sizeof(OneBitL2CaqEstimatorCtxT));
+    if (*ctx == NULL) {
+        return;
+    }
+    (*ctx)->dim = dim;
+    (*ctx)->numBits = numBits;
+    (*ctx)->oneOverSqrtD = 1.0f / sqrtf((float)dim);
+    (*ctx)->centroid = NULL;
+    (*ctx)->rotatorMatrix = rotatorMatrix;
+    (*ctx)->scannerCtx = scannerCtx;
+
+    QueryQuantizerCtxT *queryQuantCtx = NULL;
+    QueryQuantizerCtxInitRotated(&queryQuantCtx, dim, rotatorMatrix, centroidRotated);
+    (*ctx)->queryQuantCtx = queryQuantCtx;
+
+    QuantizeQueryVector(queryQuantCtx, rotatedQuery, &((*ctx)->queryQuantCode));
+}
+
 void OneBitCaqEstimatorDestroy(OneBitL2CaqEstimatorCtxT **ctx) {
     if (ctx == NULL || *ctx == NULL) {
         return;

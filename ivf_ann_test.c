@@ -8,6 +8,7 @@
 
 #include "cluster.h"
 #include "estimator.h"
+#include "rotator.h"
 // simple throttled progress printer
 static inline size_t progress_step(size_t total) {
     // Use finer granularity for very large totals
@@ -134,6 +135,11 @@ static int build_ivf(const FVecs *base, const FVecs *centroids, size_t numBits, 
                           index->sharedRotatorMatrix,
                           index->sharedEncodeConfig);
         ClusterReserve(&index->clusters[k], 64);
+
+        // 预旋转质心以便查询阶段跳过逐簇旋转
+        float *rc = (float *)malloc(sizeof(float) * index->dim);
+        rotateVector(index->sharedRotatorMatrix, index->clusters[k].centroid, rc, index->dim);
+        index->clusters[k].rotatedCentroid = rc;
     }
 
     // Temporary full code per vector (reused per assignment)
@@ -256,6 +262,10 @@ static void ivf_search_one(const IVFIndex *index,
     clock_gettime(CLOCK_MONOTONIC, &sc1);
     double scanner_time_ms = (sc1.tv_sec - sc0.tv_sec) * 1000.0 + (sc1.tv_nsec - sc0.tv_nsec) / 1e6;
 
+    // 预旋转 query，避免在每个簇重复旋转
+    float *rotatedQuery = (float *)malloc(sizeof(float) * index->dim);
+    rotateVector(index->sharedRotatorMatrix, query, rotatedQuery, index->dim);
+
     // keep only current topK; gate with 1-bit distance before computing rest-bit
     size_t sz = 0; // current number of kept candidates
     Result *cands = (Result *)malloc(sizeof(Result) * topK);
@@ -282,13 +292,13 @@ static void ivf_search_one(const IVFIndex *index,
         OneBitL2CaqEstimatorCtxT *estCtx = NULL;
         struct timespec ti0, ti1;
         clock_gettime(CLOCK_MONOTONIC, &ti0);
-        OneBitCaqEstimatorInit(&estCtx,
-                               index->dim,
-                               QUERY_QUANTIZER_NUM_BITS,
-                               cl->quantizerCtx->rotatorMatrix,
-                               cl->quantizerCtx->centroid,
-                               (float *)query,
-                               scannerCtx);
+        OneBitCaqEstimatorInitRotated(&estCtx,
+                       index->dim,
+                       QUERY_QUANTIZER_NUM_BITS,
+                       cl->quantizerCtx->rotatorMatrix,
+                       cl->rotatedCentroid,
+                       rotatedQuery,
+                       scannerCtx);
         clock_gettime(CLOCK_MONOTONIC, &ti1);
         init_onebit_time_ms += (ti1.tv_sec - ti0.tv_sec) * 1000.0 + (ti1.tv_nsec - ti0.tv_nsec) / 1e6;
         RestBitL2EstimatorCtxT *restCtx = NULL;
@@ -398,6 +408,7 @@ static void ivf_search_one(const IVFIndex *index,
     DestroyCaqScannerCtx(&scannerCtx);
     clock_gettime(CLOCK_MONOTONIC, &sc1);
     scanner_time_ms += (sc1.tv_sec - sc0.tv_sec) * 1000.0 + (sc1.tv_nsec - sc0.tv_nsec) / 1e6;
+    free(rotatedQuery);
     free(gates_by_idx);
     free(sorted_gates);
     free(cands);

@@ -54,6 +54,8 @@ typedef struct {
     size_t dim;                     // 维度
     float *centroid;                // 质心指针，用于残差化
     float *rotatorMatrix;           // 随机正交矩阵指针，用于旋转向量
+    float *centroidRotated;         // 可选：预旋转后的质心指针，若已提供则可跳过旋转步骤
+    bool inputIsRotated;            // 若 true，传入向量已旋转，仅做残差化
     float *residualVector;          // 用于存储残差向量的缓冲区指针，避免每次量化都分配内存
     float *rotatedVector;           // 用于存储旋转后向量的缓冲区指针，避免每次量化都分配内存
     // float rotatedL2Norm;            // 旋转后向量的 L2 范数
@@ -84,8 +86,25 @@ void QueryQuantizerCtxInit(QueryQuantizerCtxT **ctx,
     (*ctx)->dim = dim;
     (*ctx)->centroid = centroid;
     (*ctx)->rotatorMatrix = rotatorMatrix;
+    (*ctx)->centroidRotated = NULL;
+    (*ctx)->inputIsRotated = false;
     (*ctx)->residualVector = (float *)malloc(sizeof(float) * dim);  // 分配残差向量缓冲区
     (*ctx)->rotatedVector = (float *)malloc(sizeof(float) * dim);   // 分配旋转后向量缓冲区
+}
+
+// 针对“输入已处于旋转域，且提供了旋转后质心”的场景，避免重复旋转
+void QueryQuantizerCtxInitRotated(QueryQuantizerCtxT **ctx,
+                         size_t dim,
+                         float *rotatorMatrix,
+                         float *centroidRotated) {
+    *ctx = (QueryQuantizerCtxT *)malloc(sizeof(QueryQuantizerCtxT));
+    (*ctx)->dim = dim;
+    (*ctx)->centroid = NULL;
+    (*ctx)->rotatorMatrix = rotatorMatrix; // 保留以便复用或调试
+    (*ctx)->centroidRotated = centroidRotated;
+    (*ctx)->inputIsRotated = true;
+    (*ctx)->residualVector = (float *)malloc(sizeof(float) * dim);
+    (*ctx)->rotatedVector = (float *)malloc(sizeof(float) * dim);
 }
 
 void QueryQuantizerCtxDestroy(QueryQuantizerCtxT **ctx) {
@@ -450,6 +469,7 @@ void QuantizeQueryVector(const QueryQuantizerCtxT *ctx,
                        QueryQuantCodeT **outputCode) {
     size_t D = ctx->dim;
     float *centroid = ctx->centroid;
+    float *centroidRotated = ctx->centroidRotated;
     float *rotatorMatrix = ctx->rotatorMatrix;
     float *residualVector = ctx->residualVector;
     float *rotatedVector = ctx->rotatedVector;
@@ -464,19 +484,30 @@ void QuantizeQueryVector(const QueryQuantizerCtxT *ctx,
     clock_gettime(CLOCK_MONOTONIC, &t_after_init);
 #endif
 
-    // Step 1: 计算残差向量
-    for (size_t i = 0; i < D; ++i) {
-        residualVector[i] = inputVector[i] - centroid[i];
-    }
+    // Step 1: 计算残差向量；若输入已旋转则跳过旋转步骤
+    if (ctx->inputIsRotated) {
+        for (size_t i = 0; i < D; ++i) {
+            residualVector[i] = inputVector[i] - centroidRotated[i];
+            rotatedVector[i] = residualVector[i];
+        }
 #ifdef QUERY_QUANTIZER_PROFILE
-    clock_gettime(CLOCK_MONOTONIC, &t_after_residual);
+        clock_gettime(CLOCK_MONOTONIC, &t_after_residual);
+        t_after_rotate = t_after_residual;
+#endif
+    } else {
+        for (size_t i = 0; i < D; ++i) {
+            residualVector[i] = inputVector[i] - centroid[i];
+        }
+#ifdef QUERY_QUANTIZER_PROFILE
+        clock_gettime(CLOCK_MONOTONIC, &t_after_residual);
 #endif
 
-    // Step 2: 旋转向量
-    rotateVector(ctx->rotatorMatrix, residualVector, rotatedVector, D);
+        // Step 2: 旋转向量
+        rotateVector(ctx->rotatorMatrix, residualVector, rotatedVector, D);
 #ifdef QUERY_QUANTIZER_PROFILE
-    clock_gettime(CLOCK_MONOTONIC, &t_after_rotate);
+        clock_gettime(CLOCK_MONOTONIC, &t_after_rotate);
 #endif
+    }
 
     // Step 3: 量化编码
     // 3.1 确定值域 [min, max]

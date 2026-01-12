@@ -10,6 +10,7 @@ typedef struct {
     int cid;                       // cluster id
     size_t dim;                    // dimension
     float *centroid;               // centroid pointer (size dim)
+    float *rotatedCentroid;        // centroid after shared rotation (size dim)
     int *ids;                      // vector IDs assigned to this cluster
     size_t size;                   // number of vectors in postings
     size_t cap;                    // capacity for postings
@@ -36,6 +37,7 @@ static inline void ClusterInit(Cluster *c, int cid, size_t dim, float *centroid,
     c->cid = cid;
     c->dim = dim;
     c->centroid = centroid;
+    c->rotatedCentroid = NULL;
     c->ids = NULL;
     c->size = 0;
     c->cap = 0;
@@ -56,6 +58,7 @@ static inline void ClusterInitShared(Cluster *c,
     c->cid = cid;
     c->dim = dim;
     c->centroid = centroid;
+    c->rotatedCentroid = NULL;
     c->ids = NULL;
     c->size = 0;
     c->cap = 0;
@@ -102,6 +105,10 @@ static inline void ClusterDestroy(Cluster *c) {
     free(c->ids);
     free(c->oneBitCodes);
     free(c->resBitCodes);
+    if (c->rotatedCentroid) {
+        free(c->rotatedCentroid);
+        c->rotatedCentroid = NULL;
+    }
     c->ids = NULL;
     c->oneBitCodes = NULL;
     c->resBitCodes = NULL;
