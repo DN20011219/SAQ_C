@@ -472,48 +472,60 @@ float estimateOneBitIp(
     const OneBitL2CaqEstimatorCtxT *ctx,
     const CaqOneBitQuantCodeT *dataCaqCode
 ) {
-    size_t BlockNum = GetOneBitCodeSimdBlockNum(ctx->dim);
-    size_t bytesPerBlock = GetBytesPerSimdBlock(); // 32 bytes in AVX, but 16 bytes for NEON
+    const size_t BlockNum      = GetOneBitCodeSimdBlockNum(ctx->dim);
+    const size_t bytesPerBlock = GetBytesPerSimdBlock(); // 16 bytes for NEON
     const QueryQuantCodeT *queryCode = ctx->queryQuantCode;
-    
-    uint64_t ipEstimate = 0;
-    uint64_t ppcScalar = dataCaqCode->totalPopcount; // 1bit popcount 在量化时已统计
 
-    uint64_t tmp64[2];   // 用于 popcount
-    uint8_t *qBlock;
+    uint64_t ipEstimate = 0;
+    const uint64_t ppcScalar = dataCaqCode->totalPopcount; // 1bit popcount 在量化时已统计
+
+    // 预先计算 plane 权重，避免循环内移位
+    uint64_t planeWeight[QUERY_QUANTIZER_NUM_BITS];
+    for (int p = 0; p < QUERY_QUANTIZER_NUM_BITS; ++p) {
+        planeWeight[p] = 1ULL << (QUERY_QUANTIZER_NUM_BITS - p - 1);
+    }
 
     for (size_t j = 0; j < BlockNum; ++j) {
         const uint8_t *dBlock = dataCaqCode->storedCodes + j * bytesPerBlock;
 
-        // 1bit popcount 已预存，无需查询时重复统计
+        // data block 只 load 一次并在各 plane 复用
+        const uint8x16_t d_lo = vld1q_u8(dBlock);
 
+        // 预先计算所有 plane 的 query block 指针，减少函数调用与指针计算开销
+        uint8_t *qPlanePtr[QUERY_QUANTIZER_NUM_BITS];
         for (int plane = 0; plane < QUERY_QUANTIZER_NUM_BITS; ++plane) {
-            uint64_t partialIp = 0;
-
             GetSepQueryCodeValue(
                 ctx->queryQuantCtx,
-                ctx->queryQuantCode,
-                plane,
+                queryCode,
+                (size_t)plane,
                 j,
-                &qBlock
+                &qPlanePtr[plane]
             );
-
-            // 单个 16B 块
-            uint8x16_t q_lo = vld1q_u8(qBlock);
-            uint8x16_t d_lo = vld1q_u8(dBlock);
-            uint8x16_t a_lo = vandq_u8(q_lo, d_lo);
-            vst1q_u8((uint8_t *)tmp64, a_lo);
-
-            partialIp += __builtin_popcountll(tmp64[0]) + __builtin_popcountll(tmp64[1]);
-
-            ipEstimate += partialIp
-                * (1ULL << (QUERY_QUANTIZER_NUM_BITS - plane - 1));
         }
+
+        uint64_t blockIp = 0;
+        for (int plane = 0; plane < QUERY_QUANTIZER_NUM_BITS; ++plane) {
+            const uint8_t *qBlock = qPlanePtr[plane];
+
+            // 16B 按位与
+            const uint8x16_t q_lo = vld1q_u8(qBlock);
+            const uint8x16_t a_lo = vandq_u8(q_lo, d_lo);
+
+            // 使用 NEON 向量 popcount + 逐级规约，避免存回内存与标量 popcount
+            const uint8x16_t pc8   = vcntq_u8(a_lo);            // 每字节 bitcount
+            const uint16x8_t s16   = vpaddlq_u8(pc8);           // 16 位配对求和
+            const uint32x4_t s32   = vpaddlq_u16(s16);          // 32 位配对求和
+            const uint64x2_t s64   = vpaddlq_u32(s32);          // 64 位配对求和
+            const uint64_t  pcTot  = vgetq_lane_u64(s64, 0) + vgetq_lane_u64(s64, 1);
+
+            blockIp += pcTot * planeWeight[plane];
+        }
+
+        ipEstimate += blockIp;
     }
 
     return queryCode->delta * (float)ipEstimate +
-           (queryCode->residualQueryMin + 0.5f * queryCode->delta)
-               * (float)ppcScalar;
+           (queryCode->residualQueryMin + 0.5f * queryCode->delta) * (float)ppcScalar;
 }
 
 void InnerProductRestBit(
