@@ -215,6 +215,97 @@ static inline size_t argmax_dist(const Result *arr, size_t sz) {
     return idx;
 }
 
+// Minimal C candidate pool that mirrors the prior ad-hoc arrays
+typedef struct {
+    Result *cands;
+    float *gates_by_idx;
+    float *sorted_gates;
+    size_t size;
+    size_t cap;
+} CandidatePool;
+
+static int candpool_init(CandidatePool *p, size_t cap) {
+    p->cap = cap;
+    p->size = 0;
+    p->cands = (Result *)malloc(sizeof(Result) * cap);
+    p->gates_by_idx = (float *)malloc(sizeof(float) * cap);
+    p->sorted_gates = (float *)malloc(sizeof(float) * cap);
+    if (!p->cands || !p->gates_by_idx || !p->sorted_gates) {
+        free(p->cands); free(p->gates_by_idx); free(p->sorted_gates);
+        p->cands = NULL; p->gates_by_idx = NULL; p->sorted_gates = NULL; p->cap = 0; p->size = 0;
+        return 0;
+    }
+    return 1;
+}
+
+static void candpool_free(CandidatePool *p) {
+    if (!p) return;
+    free(p->cands);
+    free(p->gates_by_idx);
+    free(p->sorted_gates);
+    p->cands = NULL;
+    p->gates_by_idx = NULL;
+    p->sorted_gates = NULL;
+    p->cap = 0;
+    p->size = 0;
+}
+
+static inline float candpool_gate_threshold(const CandidatePool *p) {
+    return p->sorted_gates[p->size - 1];
+}
+
+static void candpool_insert_gate(CandidatePool *p, float gate) {
+    size_t pos = lower_bound_float(p->sorted_gates, p->size, gate);
+    memmove(p->sorted_gates + pos + 1, p->sorted_gates + pos, (p->size - pos) * sizeof(float));
+    p->sorted_gates[pos] = gate;
+}
+
+static void candpool_replace_gate(CandidatePool *p, size_t idx, float new_gate) {
+    float old_gate = p->gates_by_idx[idx];
+    if (old_gate == new_gate) {
+        p->gates_by_idx[idx] = new_gate;
+        return;
+    }
+    size_t pos_old = lower_bound_float(p->sorted_gates, p->size, old_gate);
+    if (pos_old < p->size && p->sorted_gates[pos_old] == old_gate) {
+        memmove(p->sorted_gates + pos_old, p->sorted_gates + pos_old + 1, (p->size - pos_old - 1) * sizeof(float));
+    } else {
+        for (size_t k = 0; k < p->size; ++k) {
+            if (p->sorted_gates[k] == old_gate) {
+                memmove(p->sorted_gates + k, p->sorted_gates + k + 1, (p->size - k - 1) * sizeof(float));
+                break;
+            }
+        }
+    }
+    size_t pos_new = lower_bound_float(p->sorted_gates, p->size - 1, new_gate);
+    memmove(p->sorted_gates + pos_new + 1, p->sorted_gates + pos_new, ((p->size - 1) - pos_new) * sizeof(float));
+    p->sorted_gates[pos_new] = new_gate;
+    p->gates_by_idx[idx] = new_gate;
+}
+
+static inline size_t candpool_worst_idx(const CandidatePool *p) {
+    return argmax_dist(p->cands, p->size);
+}
+
+static int candpool_consider(CandidatePool *p, int id, float gate, float dist) {
+    if (p->size < p->cap) {
+        p->cands[p->size].id = id;
+        p->cands[p->size].dist = dist;
+        p->gates_by_idx[p->size] = gate;
+        candpool_insert_gate(p, gate);
+        ++p->size;
+        return 1;
+    }
+    size_t worst = candpool_worst_idx(p);
+    if (dist >= p->cands[worst].dist) {
+        return 0;
+    }
+    p->cands[worst].id = id;
+    p->cands[worst].dist = dist;
+    candpool_replace_gate(p, worst, gate);
+    return 1;
+}
+
 // Select top-nprobe clusters by centroid distance
 static void select_nprobe(const IVFIndex *index, const float *q, size_t nprobe, size_t *probe_ids) {
     Result *tmp = (Result *)malloc(sizeof(Result) * index->K);
@@ -267,13 +358,14 @@ static void ivf_search_one(const IVFIndex *index,
     rotateVector(index->sharedRotatorMatrix, query, rotatedQuery, index->dim);
 
     // keep only current topK; gate with 1-bit distance before computing rest-bit
-    size_t sz = 0; // current number of kept candidates
-    Result *cands = (Result *)malloc(sizeof(Result) * topK);
-    // Maintain gates in two forms:
-    // - gates_by_idx: 1-bit distance aligned with `cands` index (for replacement updates)
-    // - sorted_gates: 1-bit distances kept sorted ascending for binary-search threshold
-    float *gates_by_idx = (float *)malloc(sizeof(float) * topK);
-    float *sorted_gates = (float *)malloc(sizeof(float) * topK);
+    CandidatePool pool = {0};
+    if (topK == 0 || !candpool_init(&pool, topK)) {
+        fprintf(stderr, "Failed to init candidate pool\n");
+        free(rotatedQuery);
+        free(probe_ids);
+        DestroyCaqScannerCtx(&scannerCtx);
+        return;
+    }
 
     size_t onebit_calls = 0;
     size_t restbit_calls = 0;
@@ -324,9 +416,9 @@ static void ivf_search_one(const IVFIndex *index,
 
             // Gating: only compute rest-bit distance if 1-bit distance could enter topK
             struct timespec tg0, tg1;
-            if (sz >= topK) {
+            if (pool.size >= topK) {
                 clock_gettime(CLOCK_MONOTONIC, &tg0);
-                float gate_thresh = max_gate_value(sorted_gates, sz);
+                float gate_thresh = candpool_gate_threshold(&pool);
                 int skip = (d1 >= gate_thresh);
                 clock_gettime(CLOCK_MONOTONIC, &tg1);
                 gating_time_ms += (tg1.tv_sec - tg0.tv_sec) * 1000.0 + (tg1.tv_nsec - tg0.tv_nsec) / 1e6;
@@ -341,45 +433,7 @@ static void ivf_search_one(const IVFIndex *index,
 
             struct timespec tr0, tr1;
             clock_gettime(CLOCK_MONOTONIC, &tr0);
-            if (sz < topK) {
-                cands[sz].id = cl->ids[j];
-                cands[sz].dist = d2;
-                // record gate by candidate index
-                gates_by_idx[sz] = d1;
-                // insert gate into sorted_gates via binary search
-                size_t pos = lower_bound_float(sorted_gates, sz, d1);
-                memmove(sorted_gates + pos + 1, sorted_gates + pos, (sz - pos) * sizeof(float));
-                sorted_gates[pos] = d1;
-                ++sz;
-            } else {
-                // Replace worst current candidate by refined distance
-                size_t worst_idx = argmax_dist(cands, sz);
-                if (d2 < cands[worst_idx].dist) {
-                    cands[worst_idx].id = cl->ids[j];
-                    cands[worst_idx].dist = d2;
-                    // update gates structures: remove old gate and insert new gate using binary search
-                    float old_gate = gates_by_idx[worst_idx];
-                    if (old_gate != d1) {
-                        // remove one instance of old_gate from sorted_gates
-                        size_t pos_old = lower_bound_float(sorted_gates, sz, old_gate);
-                        if (pos_old < sz && sorted_gates[pos_old] == old_gate) {
-                            memmove(sorted_gates + pos_old, sorted_gates + pos_old + 1, (sz - pos_old - 1) * sizeof(float));
-                        } else {
-                            // fallback: linear search if duplicates or precision issues
-                            size_t k = 0;
-                            for (; k < sz; ++k) { if (sorted_gates[k] == old_gate) break; }
-                            if (k < sz) {
-                                memmove(sorted_gates + k, sorted_gates + k + 1, (sz - k - 1) * sizeof(float));
-                            }
-                        }
-                        // insert new gate
-                        size_t pos_new = lower_bound_float(sorted_gates, sz - 1, d1);
-                        memmove(sorted_gates + pos_new + 1, sorted_gates + pos_new, ((sz - 1) - pos_new) * sizeof(float));
-                        sorted_gates[pos_new] = d1;
-                    }
-                    gates_by_idx[worst_idx] = d1;
-                }
-            }
+            candpool_consider(&pool, cl->ids[j], d1, d2);
             clock_gettime(CLOCK_MONOTONIC, &tr1);
             reservoir_time_ms += (tr1.tv_sec - tr0.tv_sec) * 1000.0 + (tr1.tv_nsec - tr0.tv_nsec) / 1e6;
         }
@@ -397,11 +451,11 @@ static void ivf_search_one(const IVFIndex *index,
 
     // pick topK by distance
     clock_gettime(CLOCK_MONOTONIC, &ts0);
-    qsort(cands, sz, sizeof(Result), cmp_result);
+    qsort(pool.cands, pool.size, sizeof(Result), cmp_result);
     clock_gettime(CLOCK_MONOTONIC, &ts1);
     double sort_ms = (ts1.tv_sec - ts0.tv_sec) * 1000.0 + (ts1.tv_nsec - ts0.tv_nsec) / 1e6;
-    size_t ret = (sz < topK) ? sz : topK;
-    for (size_t i = 0; i < ret; ++i) out[i] = cands[i];
+    size_t ret = (pool.size < topK) ? pool.size : topK;
+    for (size_t i = 0; i < ret; ++i) out[i] = pool.cands[i];
     for (size_t i = ret; i < topK; ++i) { out[i].id = -1; out[i].dist = INFINITY; }
 
     clock_gettime(CLOCK_MONOTONIC, &sc0);
@@ -409,9 +463,7 @@ static void ivf_search_one(const IVFIndex *index,
     clock_gettime(CLOCK_MONOTONIC, &sc1);
     scanner_time_ms += (sc1.tv_sec - sc0.tv_sec) * 1000.0 + (sc1.tv_nsec - sc0.tv_nsec) / 1e6;
     free(rotatedQuery);
-    free(gates_by_idx);
-    free(sorted_gates);
-    free(cands);
+    candpool_free(&pool);
     free(probe_ids);
 
     if (onebit_calls_out) *onebit_calls_out = onebit_calls;
@@ -571,7 +623,7 @@ int main(int argc, char **argv) {
     }
 
     // Run queries
-    size_t ef = 1024 / 2;
+    size_t ef = 1024 / 1;
     Result *top = (Result *)malloc(sizeof(Result) * ef);
     double recall_sum = 0.0;
     double lat_sum_ms = 0.0;     // running sum of per-query latency (ms)
