@@ -41,7 +41,7 @@ static int32_t dot_u8_avx2(const uint8_t* a, const uint8_t* b) {
 #if defined(__ARM_NEON) || defined(__ARM_NEON__)
 #include <arm_neon.h>
 static int32_t dot_u8_neon(const uint8_t* a, const uint8_t* b) {
-    uint64x2_t acc64 = vdupq_n_u64(0);
+    uint32x4_t acc32 = vdupq_n_u32(0);
     for (int i = 0; i < DIM; i += 16) {
         uint8x16_t va = vld1q_u8(a + i);
         uint8x16_t vb = vld1q_u8(b + i);
@@ -49,10 +49,11 @@ static int32_t dot_u8_neon(const uint8_t* a, const uint8_t* b) {
         uint16x8_t prod1 = vmull_u8(vget_high_u8(va), vget_high_u8(vb));
         uint32x4_t sum0 = vpaddlq_u16(prod0);
         uint32x4_t sum1 = vpaddlq_u16(prod1);
-        acc64 = vaddq_u64(acc64, vpaddlq_u32(sum0));
-        acc64 = vaddq_u64(acc64, vpaddlq_u32(sum1));
+        acc32 = vaddq_u32(acc32, sum0);
+        acc32 = vaddq_u32(acc32, sum1);
     }
-    return (int32_t)(vgetq_lane_u64(acc64, 0) + vgetq_lane_u64(acc64, 1));
+    uint64x2_t sum64 = vpaddlq_u32(acc32);
+    return (int32_t)(vgetq_lane_u64(sum64, 0) + vgetq_lane_u64(sum64, 1));
 }
 #endif
 
