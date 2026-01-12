@@ -43,13 +43,9 @@
 
 ```bash
 set -e
-rm -rf build && mkdir -p build && cd build
-cmake -DSIMD=AVX ..
-cmake -DSIMD=NEON ..
-cmake -DSIMD=NONE .. # 或弃用 SIMD 优化
-cmake --build . -j
 rm -rf build && mkdir -p build && cd build && cmake -DSIMD=AVX .. && cmake --build . -j && cd ../
-cd ../
+rm -rf build && mkdir -p build && cd build && cmake -DSIMD=NEON .. && cmake --build . -j && cd ../
+rm -rf build && mkdir -p build && cd build && cmake -DSIMD=NONE .. && cmake --build . -j && cd ../ # 或弃用 SIMD 优化
 ```
 
 本项目预计支持 AVX 和 NEON 两个 SIMD 版本，以实现低配机器可运行。

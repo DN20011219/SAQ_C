@@ -528,6 +528,27 @@ float estimateOneBitIp(
            (queryCode->residualQueryMin + 0.5f * queryCode->delta) * (float)ppcScalar;
 }
 
+static inline uint64_t dot_u8_neon_sum(const uint8_t *a, const uint8_t *b, size_t D) {
+    uint32x4_t acc32 = vdupq_n_u32(0);
+    size_t i = 0;
+    for (; i + 16 <= D; i += 16) {
+        uint8x16_t va = vld1q_u8(a + i);
+        uint8x16_t vb = vld1q_u8(b + i);
+        uint16x8_t prod0 = vmull_u8(vget_low_u8(va), vget_low_u8(vb));
+        uint16x8_t prod1 = vmull_u8(vget_high_u8(va), vget_high_u8(vb));
+        uint32x4_t sum0 = vpaddlq_u16(prod0);
+        uint32x4_t sum1 = vpaddlq_u16(prod1);
+        acc32 = vaddq_u32(acc32, sum0);
+        acc32 = vaddq_u32(acc32, sum1);
+    }
+    uint64x2_t sum64 = vpaddlq_u32(acc32);
+    uint64_t sum = (uint64_t)vgetq_lane_u64(sum64, 0) + (uint64_t)vgetq_lane_u64(sum64, 1);
+    for (; i < D; ++i) {
+        sum += (uint64_t)a[i] * (uint64_t)b[i];
+    }
+    return sum;
+}
+
 void InnerProductRestBit(
     const RestBitL2EstimatorCtxT *ctx,
     const CaqResBitQuantCodeT *dataCaqCode,
@@ -539,39 +560,8 @@ void InnerProductRestBit(
     const uint8_t *dCodes = dataCaqCode->storedCodes;
     const uint64_t precomputedSumD = dataCaqCode->sumCodes;
 
-    uint32x4_t accQD = vdupq_n_u32(0);  // sum(q * d)
-
-    size_t i = 0;
-    for (; i + 16 <= D; i += 16) {
-        uint8x16_t q8 = vld1q_u8(qCodes + i);
-        uint8x16_t d8 = vld1q_u8(dCodes + i);
-
-        // 解码为 16 位
-        uint16x8_t q16_lo = vmovl_u8(vget_low_u8(q8));
-        uint16x8_t q16_hi = vmovl_u8(vget_high_u8(q8));
-        uint16x8_t d16_lo = vmovl_u8(vget_low_u8(d8));
-        uint16x8_t d16_hi = vmovl_u8(vget_high_u8(d8));
-
-        // sum(q * d)
-        accQD = vaddq_u32(accQD, vmull_u16(vget_low_u16(q16_lo), vget_low_u16(d16_lo)));
-        accQD = vaddq_u32(accQD, vmull_u16(vget_high_u16(q16_lo), vget_high_u16(d16_lo)));
-        accQD = vaddq_u32(accQD, vmull_u16(vget_low_u16(q16_hi), vget_low_u16(d16_hi)));
-        accQD = vaddq_u32(accQD, vmull_u16(vget_high_u16(q16_hi), vget_high_u16(d16_hi)));
-    }
-
-    //  水平规约
-    uint64_t sumQD =
-        (uint64_t)vgetq_lane_u32(accQD, 0) +
-        (uint64_t)vgetq_lane_u32(accQD, 1) +
-        (uint64_t)vgetq_lane_u32(accQD, 2) +
-        (uint64_t)vgetq_lane_u32(accQD, 3);
-
+    uint64_t sumQD = dot_u8_neon_sum(qCodes, dCodes, D);
     uint64_t sumD = precomputedSumD;
-
-    // 处理尾部
-    for (; i < D; ++i) {
-        sumQD += (uint64_t)qCodes[i] * (uint64_t)dCodes[i];
-    }
 
     // 解码
     double qDelta = (double)queryCode->delta;
