@@ -633,7 +633,7 @@ void EasyEstimatorCtxPrepare(
 /**
  * 获取 query 量化编码在指定维度的原始布局的值
  */
-void GetOriQueryCodeValue(
+inline void GetOriQueryCodeValue(
     const QueryQuantizerCtxT *outputCode,
     const QueryQuantCodeT *queryCode,
     size_t dimIndex,
@@ -647,7 +647,7 @@ void GetOriQueryCodeValue(
 /**
  * 获取 query 量化编码在指定维度块和 bit 平面的指针（分离式布局）
  */
-void GetSepQueryCodeValue(
+inline void GetSepQueryCodeValue(
     const QueryQuantizerCtxT *quantizerCtx,
     const QueryQuantCodeT *queryCode,
     size_t planeIndex,

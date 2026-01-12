@@ -22,10 +22,10 @@
 #endif
 
 #ifdef SIMD_MAX_CAPACITY
-size_t GetOneBitCodeSimdBlockNum(size_t dim) {
+inline size_t GetOneBitCodeSimdBlockNum(size_t dim) {
     return (dim + SIMD_MAX_CAPACITY - 1) / SIMD_MAX_CAPACITY;   // 向上取整
 }
-size_t GetBytesPerSimdBlock() {
+inline size_t GetBytesPerSimdBlock() {
     return SIMD_MAX_CAPACITY / 8;    // 32 或 16
 }
 #endif

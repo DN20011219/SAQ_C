@@ -485,6 +485,9 @@ float estimateOneBitIp(
         planeWeight[p] = 1ULL << (QUERY_QUANTIZER_NUM_BITS - p - 1);
     }
 
+    // 预先计算所有 plane 的 query block 指针，减少函数调用与指针计算开销
+    uint8_t *qPlanePtr[QUERY_QUANTIZER_NUM_BITS];
+
     for (size_t j = 0; j < BlockNum; ++j) {
         const uint8_t *dBlock = dataCaqCode->storedCodes + j * bytesPerBlock;
 
@@ -492,7 +495,6 @@ float estimateOneBitIp(
         const uint8x16_t d_lo = vld1q_u8(dBlock);
 
         // 预先计算所有 plane 的 query block 指针，减少函数调用与指针计算开销
-        uint8_t *qPlanePtr[QUERY_QUANTIZER_NUM_BITS];
         for (int plane = 0; plane < QUERY_QUANTIZER_NUM_BITS; ++plane) {
             GetSepQueryCodeValue(
                 ctx->queryQuantCtx,
